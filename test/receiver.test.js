@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const { createReceiver } = require("../src/receiver");
 
 const secret = "hook-secret";
-const repository = { full_name: "stella-rain/app", default_branch: "main" };
+const repository = { full_name: "stella-rain/app", default_branch: "main", owner: { login: "stella-rain" } };
 const pr = { number: 7, merged: true, draft: false, auto_merge: null, head: { ref: "claude/t", sha: "s" } };
 
 async function start({ publish, onTrigger = () => {} } = {}) {
@@ -17,6 +17,7 @@ async function start({ publish, onTrigger = () => {} } = {}) {
     publish: publish || (async (subject, event, msgId) => { published.push({ subject, event, msgId }); }),
     onTrigger: (t) => { triggers.push(t); onTrigger(t); },
     log: (line) => logs.push(line),
+    allowedOwners: ["stella-rain"],
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -147,5 +148,28 @@ test("a publish that throws logs only the publish error line", async () => {
     const res = await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository });
     assert.strictEqual(res.status, 503);
     assert.deepStrictEqual(s.logs, ["publish github.stella-rain.app.pr.7.pull_request: nats down"]);
+  } finally { await s.close(); }
+});
+
+test("a delivery from an owner that is not allowed gets 204, publishes nothing, starts no check, logs one line", async () => {
+  const s = await start();
+  const other = { ...repository, full_name: "someone-else/app", owner: { login: "someone-else" } };
+  try {
+    const res = await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository: other }, { delivery: "x-1" });
+    assert.strictEqual(res.status, 204);
+    assert.deepStrictEqual(s.published, []);
+    assert.deepStrictEqual(s.triggers, []);
+    assert.deepStrictEqual(s.logs, ["x-1 pull_request.closed -> dropped owner someone-else"]);
+    assert.strictEqual((await deliver(s.base, "push", { ref: "refs/heads/main", after: "d", repository: other })).status, 204);
+    assert.deepStrictEqual(s.triggers, []);
+  } finally { await s.close(); }
+});
+
+test("the owner is compared case-insensitively", async () => {
+  const s = await start();
+  try {
+    const res = await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository: { ...repository, owner: { login: "Stella-Rain" } } });
+    assert.strictEqual(res.status, 202);
+    assert.strictEqual(s.published.length, 1);
   } finally { await s.close(); }
 });
