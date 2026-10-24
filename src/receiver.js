@@ -29,7 +29,8 @@ function send(res, status, body = "") {
   res.end(typeof body === "string" ? body : JSON.stringify(body));
 }
 
-function createReceiver({ secret, publish, onTrigger, log = console.error }) {
+function createReceiver({ secret, publish, onTrigger, allowedOwners, log = console.error }) {
+  const allowed = new Set(allowedOwners.map((o) => o.toLowerCase()));
   async function onDelivery(req, res) {
     let body;
     try { body = await readBody(req); } catch { return send(res, 413); }
@@ -41,6 +42,8 @@ function createReceiver({ secret, publish, onTrigger, log = console.error }) {
     const delivery = req.headers["x-github-delivery"] || null;
     const name = typeof payload?.action === "string" ? `${event}.${payload.action}` : event;
     const tag = `${delivery || "-"} ${name} ->`;
+    const owner = payload?.repository?.owner?.login;
+    if (payload?.repository && !allowed.has(String(owner).toLowerCase())) { log(`${tag} dropped owner ${owner}`); return send(res, 204); }
     const out = normalize(event, payload, delivery);
     const trigger = mergeTrigger(event, payload);
     if (!out && !trigger) { log(`${tag} dropped`); return send(res, 204); }
@@ -88,7 +91,9 @@ async function main() {
   if (!process.env.APP_ID) throw new Error("APP_ID is not set");
   const app = createApp({ appId: process.env.APP_ID, privateKey: fileSetting("APP_PRIVATE_KEY_FILE") });
   const watch = createMergeWatch({ gh: app, publish });
-  const server = createReceiver({ secret: fileSetting("WEBHOOK_SECRET_FILE"), publish, onTrigger: (t) => watch.handle(t) });
+  const allowedOwners = (process.env.ALLOWED_OWNERS || "").split(",").map((o) => o.trim()).filter(Boolean);
+  if (!allowedOwners.length) throw new Error("ALLOWED_OWNERS is not set");
+  const server = createReceiver({ secret: fileSetting("WEBHOOK_SECRET_FILE"), allowedOwners, publish, onTrigger: (t) => watch.handle(t) });
   const port = Number(process.env.PORT || 8787);
   server.listen(port, () => console.log(`event-broker receiver on ${port}`));
 }
