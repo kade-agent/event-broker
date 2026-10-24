@@ -73,6 +73,8 @@ const fileSetting = (name) => {
 };
 
 async function main() {
+  const allowedOwners = (process.env.ALLOWED_OWNERS || "").split(",").map((o) => o.trim()).filter(Boolean);
+  if (!allowedOwners.length) throw new Error("ALLOWED_OWNERS is not set");
   const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");
   const { jetstream, jetstreamManager } = require("@nats-io/jetstream");
   const { ensureStream } = require("./stream");
@@ -91,8 +93,6 @@ async function main() {
   if (!process.env.APP_ID) throw new Error("APP_ID is not set");
   const app = createApp({ appId: process.env.APP_ID, privateKey: fileSetting("APP_PRIVATE_KEY_FILE") });
   const watch = createMergeWatch({ gh: app, publish });
-  const allowedOwners = (process.env.ALLOWED_OWNERS || "").split(",").map((o) => o.trim()).filter(Boolean);
-  if (!allowedOwners.length) throw new Error("ALLOWED_OWNERS is not set");
   const server = createReceiver({ secret: fileSetting("WEBHOOK_SECRET_FILE"), allowedOwners, publish, onTrigger: (t) => watch.handle(t) });
   const port = Number(process.env.PORT || 8787);
   server.listen(port, () => console.log(`event-broker receiver on ${port}`));
