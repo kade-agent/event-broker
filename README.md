@@ -73,13 +73,24 @@ on that PR. A push to the default branch starts one on every open PR on that bas
    - `<nats host>` → `127.0.0.1:8080`, with the WebSocket headers.
 
    The router forwards only 443. Port 4222 stays on the LAN.
-6. **The dispatcher:**
-   - **Local:** `EVENT_BROKER_URL=nats://<LAN address>:4222`, no key. On Windows, use `setx`,
-     then restart the Claude app.
-   - **Cloud:** the environment's variables are `EVENT_BROKER_URL=wss://<nats host>`,
-     `EVENT_BROKER_NKEY_FILE`, and `EVENT_BROKER_CLOUD_SEED`, which is the line in
-     `secrets/cloud_seed`. That file is never mounted into a container. Its setup script writes
-     the seed file (agent-config, `pr-watch.md`).
+6. **The dispatcher** runs `client/watch.sh` as its Monitor command (agent-config,
+   `pr-watch.md`). It prints one event per line, and `BROKER-DOWN <why>` when it gives up.
+   - **Local:** `EVENT_BROKER_URL=nats://<LAN address>:4222`, no key. On Windows:
+     - install `nats.exe` from the natscli releases (`nats-0.5.0-windows-amd64.zip`) and put
+       its folder on the user `PATH`;
+     - set the URL with `setx`;
+     - restart the Claude app, so new sessions see both.
+   - **Cloud,** the environment's settings:
+     - **Variables:** `EVENT_BROKER_URL=wss://<nats host>`,
+       `EVENT_BROKER_NKEY_FILE=/root/.event-broker.nk`, and `EVENT_BROKER_CLOUD_SEED` (the line
+       in `secrets/cloud_seed`, which is never mounted into a container).
+     - **Network access:** allows `<nats host>`.
+     - **Setup script:** runs `client/install-nats.sh` from this repository (pinned natscli
+       0.5.0), and nothing else:
+       `curl -fsSL https://raw.githubusercontent.com/kade-agent/event-broker/main/client/install-nats.sh | bash`.
+       A setup script cannot see the environment's variables, so it never writes the seed.
+       `client/watch.sh` writes the seed file from `EVENT_BROKER_CLOUD_SEED` when the watch
+       starts.
 7. **Check it:**
    - The App's "Recent deliveries" page shows the `ping` with a 200. A 401 means the App's webhook
      secret differs from `secrets/webhook_secret`.
