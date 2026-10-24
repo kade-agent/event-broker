@@ -65,7 +65,7 @@ function createServer({ secret, token, store, heartbeatMs = 30000 }) {
     // Replay and registration run in one tick, so no event falls between them.
     subscribers.add(res);
     const beat = setInterval(() => res.write(": heartbeat\n\n"), heartbeatMs);
-    req.on("close", () => { clearInterval(beat); subscribers.delete(res); });
+    res.on("close", () => { clearInterval(beat); subscribers.delete(res); });
   }
 
   return http.createServer((req, res) => {
