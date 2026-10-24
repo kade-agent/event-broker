@@ -1,7 +1,7 @@
 "use strict";
-// Sets up a deploy folder on the NAS (README, "Deploying"): .env from .env.example, both NKey pairs
-// with the public keys always derived from their seeds, the webhook secret, the LAN password, and
-// file owners the containers can read. Safe to run again: it fixes what is wrong and keeps the rest.
+// Sets up a deploy folder on the NAS (README, "Deploying"): .env from .env.example, a receiver and a
+// reader NKey pair for each owner in ALLOWED_OWNERS (public keys always derived from the seeds), the
+// webhook secret, and file owners the containers can read. Safe to run again: it fixes what is wrong and keeps the rest.
 // Run on the NAS: docker compose run --rm setup
 // It never prints a seed or a secret.
 const fs = require("node:fs");
@@ -12,6 +12,9 @@ const { nkeys } = require("@nats-io/transport-node");
 const CONTAINER = { uid: 1000, gid: 1000 }; // the image's "node" user
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+
+// SOME-OWNER -> SOME_OWNER, the form in .env variable names.
+const envName = (owner) => owner.toUpperCase().replace(/-/g, "_");
 
 const placeholder = (v) => v == null || v === "" || /^<.*>$/.test(v);
 
@@ -62,19 +65,38 @@ function runSetup(dir, { log = console.log, isRoot = process.getuid ? process.ge
     changed.push("secrets/webhook_secret");
   }
 
-  // Each pair: keep a valid seed file; else take a seed pasted into .env by mistake; else make one.
-  for (const [file, key] of [["receiver_nkey_seed", "RECEIVER_NKEY"], ["cloud_seed", "CLOUD_NKEY"]]) {
-    let seed = readSecret(file);
-    if (!publicOf(seed)) {
-      const pasted = get(key);
-      seed = publicOf(pasted) ? pasted : dec.decode(nkeys.createUser().getSeed());
-      writeSecret(file, seed);
-      changed.push(`secrets/${file}`);
+  const owners = (get("ALLOWED_OWNERS") || "").split(",").map((o) => o.trim().toLowerCase()).filter((o) => o && !placeholder(o));
+  if (!owners.length) throw new Error("ALLOWED_OWNERS is not set in .env (comma-separated owners)");
+
+  // One receiver pair and one reader pair per owner: keep a valid seed file, else make one. The
+  // public key in .env is always derived from the seed file.
+  const seeds = {};
+  for (const owner of owners) {
+    for (const kind of ["receiver", "reader"]) {
+      const file = `${kind}_${owner}_seed`;
+      let seed = readSecret(file);
+      if (!publicOf(seed)) {
+        seed = dec.decode(nkeys.createUser().getSeed());
+        writeSecret(file, seed);
+        changed.push(`secrets/${file}`);
+      }
+      seeds[file] = seed;
+      set(`${kind.toUpperCase()}_NKEY_${envName(owner)}`, publicOf(seed));
     }
-    set(key, publicOf(seed));
+  }
+  // The receiver's seeds, the only ones mounted: one "<owner> <seed>" line per owner.
+  const receiverSeeds = owners.map((o) => `${o} ${seeds[`receiver_${o}_seed`]}`).join("\n");
+  if (readSecret("receiver_seeds") !== receiverSeeds) {
+    writeSecret("receiver_seeds", receiverSeeds);
+    changed.push("secrets/receiver_seeds");
+  }
+  // The keys of the single-account design are gone.
+  for (const key of ["RECEIVER_NKEY", "CLOUD_NKEY", "LAN_UNUSED_PASSWORD"]) {
+    if (get(key) === undefined) continue;
+    lines = lines.filter((x) => !x.startsWith(key + "="));
+    changed.push(`${key} (removed)`);
   }
 
-  if (placeholder(get("LAN_UNUSED_PASSWORD"))) set("LAN_UNUSED_PASSWORD", crypto.randomBytes(24).toString("hex"));
   // compose reads every .env value for every service, so a "<…>" left here would break even this
   // command's next run; empty makes compose use its default until Kade fills it in.
   for (const key of ["APP_ID", "LAN_ADDRESS"]) {
@@ -89,8 +111,9 @@ function runSetup(dir, { log = console.log, isRoot = process.getuid ? process.ge
   // Owners: the container reads its three secrets as uid 1000; the person deploying reads the rest.
   const me = owner || (() => { const s = fs.statSync(dir); return { uid: s.uid, gid: s.gid }; })();
   const files = [
-    [at("webhook_secret"), CONTAINER], [at("receiver_nkey_seed"), CONTAINER], [at("app_private_key.pem"), CONTAINER],
-    [at("cloud_seed"), me], [envFile, me],
+    [at("webhook_secret"), CONTAINER], [at("receiver_seeds"), CONTAINER], [at("app_private_key.pem"), CONTAINER],
+    ...owners.flatMap((o) => [[at(`receiver_${o}_seed`), me], [at(`reader_${o}_seed`), me]]),
+    [envFile, me],
   ];
   for (const [file, who] of files) {
     if (!fs.existsSync(file)) continue;
@@ -100,7 +123,8 @@ function runSetup(dir, { log = console.log, isRoot = process.getuid ? process.ge
   if (isRoot) chown(secrets, me.uid, me.gid);
 
   log(changed.length ? `Changed: ${changed.join(", ")}` : "Nothing to change: the folder is set up.");
-  log("The cloud environment's EVENT_BROKER_CLOUD_SEED is the line in secrets/cloud_seed (it is never mounted into a container).");
+  log("Reader seeds (never mounted into a container); each goes to that org's dispatcher as its key file:");
+  for (const o of owners) log(`  ${o}: secrets/reader_${o}_seed`);
   if (todo.length) log(`Still to do by hand: ${todo.join(", ")} (README, "Deploying").`);
   else log("Next: docker compose up -d");
   if (!isRoot) log("Not run as root: file owners were left as they are (docker compose run --rm setup runs as root).");

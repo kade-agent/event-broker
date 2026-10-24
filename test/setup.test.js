@@ -123,16 +123,17 @@ test("without ALLOWED_OWNERS it stops and says so", () => {
   assert.throws(() => runSetup(dir, quiet), /ALLOWED_OWNERS/);
 });
 
-test("as root, receiver seeds go to uid 1000 and reader seeds and .env to the folder's owner", () => {
+test("as root, receiver_seeds goes to uid 1000 and reader seeds and .env to the folder's owner", () => {
   const dir = workdir();
   fs.mkdirSync(path.join(dir, "secrets"));
   fs.writeFileSync(path.join(dir, "secrets", "app_private_key.pem"), "pem");
   const owners = {};
   runSetup(dir, { log: () => {}, isRoot: true, owner: { uid: 1026, gid: 100 }, chown: (p, uid, gid) => { owners[path.relative(dir, p).replace(/\\/g, "/")] = [uid, gid]; } });
-  for (const f of ["webhook_secret", "receiver_seeds", "receiver_kade-agent_seed", "app_private_key.pem"]) {
+  for (const f of ["webhook_secret", "receiver_seeds", "app_private_key.pem"]) {
     assert.deepStrictEqual(owners[`secrets/${f}`], [1000, 1000], f);
   }
   assert.deepStrictEqual(owners["secrets/reader_kade-agent_seed"], [1026, 100]);
+  assert.deepStrictEqual(owners["secrets/receiver_kade-agent_seed"], [1026, 100], "only receiver_seeds is mounted");
   assert.deepStrictEqual(owners[".env"], [1026, 100]);
 });
 
