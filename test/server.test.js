@@ -53,7 +53,7 @@ async function readFrames(res, want, { heartbeat = false } = {}) {
       const raw = buf.slice(0, i);
       buf = buf.slice(i + 2);
       if (raw.startsWith(":")) {
-        if (heartbeat) { await reader.cancel(); return frames; }
+        if (heartbeat && raw === ": heartbeat") { await reader.cancel(); return frames; }
         continue;
       }
       frames.push({ id: Number(/^id: (\d+)$/m.exec(raw)[1]), data: JSON.parse(/^data: (.*)$/m.exec(raw)[1]) });
