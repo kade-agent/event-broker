@@ -87,3 +87,19 @@ test("a failed read of one PR does not stop the others", async () => {
   assert.deepStrictEqual(published.map((p) => p.event.pr), [2]);
   assert.deepStrictEqual(errors, ["GitHub 502"]);
 });
+
+test("a publish logs one line with the message id; an unchanged state logs nothing more", async () => {
+  const logs = [];
+  const { w } = watch(fakeGh({ 5: ["unknown", "dirty"] }), { log: (l) => logs.push(l) });
+  await w.handle({ repo: "stella-rain/app", pr: 5 });
+  assert.deepStrictEqual(logs, ["mergeable:stella-rain/app#5:sha5:dirty mergeable.dirty -> published github.stella-rain.app.pr.5.mergeable"]);
+  await w.handle({ repo: "stella-rain/app", pr: 5 });
+  assert.strictEqual(logs.length, 1);
+});
+
+test("a duplicate PubAck logs a duplicate line", async () => {
+  const logs = [];
+  const { w } = watch(fakeGh({ 5: ["dirty"] }), { log: (l) => logs.push(l), publish: async () => ({ duplicate: true }) });
+  await w.handle({ repo: "stella-rain/app", pr: 5 });
+  assert.deepStrictEqual(logs, ["mergeable:stella-rain/app#5:sha5:dirty mergeable.dirty -> duplicate github.stella-rain.app.pr.5.mergeable"]);
+});
