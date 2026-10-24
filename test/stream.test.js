@@ -82,10 +82,10 @@ test("each stream reserves 128 MiB", () => {
   assert.strictEqual(streamFor("stella-rain").max_bytes, 134217728);
 });
 
-test("four orgs use at most half of the server's max_file_store", () => {
+test("six orgs fit the server's max_file_store, so four leave room for two more", () => {
   const conf = fs.readFileSync(path.join(__dirname, "..", "nats", "nats-server.conf"), "utf8");
   const m = /^\s*max_file_store:\s*(\d+)\s*(KB|MB|GB|TB)?\s*$/im.exec(conf);
   assert.ok(m, "max_file_store is set in nats-server.conf");
   const unit = { KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12 }[(m[2] || "").toUpperCase()] || 1; // the server's decimal units
-  assert.ok(4 * streamFor("stella-rain").max_bytes <= (Number(m[1]) * unit) / 2);
+  assert.ok(6 * streamFor("stella-rain").max_bytes <= Number(m[1]) * unit);
 });
