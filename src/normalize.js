@@ -15,6 +15,7 @@ const prefix = (fullName) => {
 const blank = (delivery, repo) => ({
   delivery, repo, pr: null, branch: null, event: null, action: null, merged: null,
   draft: null, auto_merge: null, conclusion: null, check: null, mergeable_state: null, sha: null,
+  issue: null, label: null, state_reason: null, comment: null,
 });
 
 const firstPr = (prs) => (Array.isArray(prs) && prs.length > 0 ? prs[0].number : null);
@@ -52,6 +53,20 @@ const HANDLERS = {
     if (p.action !== "submitted") return null;
     return { ...prFields(p.pull_request), action: p.action, conclusion: p.review.state };
   },
+  issues(p) {
+    if (p.action === "closed" || p.action === "reopened") {
+      return { issue: p.issue.number, action: p.action, state_reason: p.issue.state_reason ?? null };
+    }
+    if (p.action === "labeled") return { issue: p.issue.number, action: p.action, label: p.label.name };
+    return null;
+  },
+  issue_comment(p) {
+    if (p.action !== "created") return null;
+    const c = p.comment;
+    const number = p.issue.number;
+    const ids = p.issue.pull_request ? { pr: number } : { issue: number };
+    return { ...ids, action: p.action, comment: { id: c.id, author: c.user ? c.user.login : null, url: c.html_url } };
+  },
   push(p) {
     const branch = p.repository.default_branch;
     if (p.ref !== `refs/heads/${branch}`) return null;
@@ -63,6 +78,7 @@ function subjectOf(e) {
   const base = prefix(e.repo);
   if (e.event === "push") return `${base}.push.${token(e.branch)}`;
   if (e.pr != null) return `${base}.pr.${e.pr}.${e.event}`;
+  if (e.issue != null) return `${base}.issue.${e.issue}.${e.event}`;
   return `${base}.branch.${token(e.branch)}.${e.event}`;
 }
 

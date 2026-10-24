@@ -10,6 +10,7 @@ const D = "1f2e-guid";
 const blank = {
   delivery: D, repo: "stella-rain/app", pr: null, branch: null, event: null, action: null, merged: null,
   draft: null, auto_merge: null, conclusion: null, check: null, mergeable_state: null, sha: null,
+  issue: null, label: null, state_reason: null, comment: null,
 };
 
 test("a merged PR becomes one event on its PR subject", () => {
@@ -95,4 +96,66 @@ test("a push to the default branch or a PR synchronize starts a mergeability che
   assert.strictEqual(mergeTrigger("push", { ref: "refs/heads/claude/x", repository }), null);
   assert.strictEqual(mergeTrigger("pull_request", { action: "closed", pull_request: pr, repository }), null);
   assert.strictEqual(mergeTrigger("check_run", { action: "completed", repository }), null);
+});
+
+const tasks = { full_name: "kade-agent/tasks", default_branch: "main" };
+const issue = (extra = {}) => ({ number: 4, title: "SECRET TITLE", body: "SECRET BODY", ...extra });
+
+test("a labeled issue is kept with its label name", () => {
+  const r = normalize("issues", { action: "labeled", issue: issue(), label: { name: "status:running" }, repository: tasks }, D);
+  assert.deepStrictEqual(r, {
+    subject: "github.kade-agent.tasks.issue.4.issues",
+    event: { ...blank, repo: "kade-agent/tasks", issue: 4, event: "issues", action: "labeled", label: "status:running" },
+  });
+  assert.ok(!JSON.stringify(r).includes("SECRET"));
+});
+
+test("a closed or reopened issue carries its state reason", () => {
+  const c = normalize("issues", { action: "closed", issue: issue({ state_reason: "completed" }), repository: tasks }, D);
+  assert.strictEqual(c.event.state_reason, "completed");
+  assert.strictEqual(c.event.label, null);
+  const r = normalize("issues", { action: "reopened", issue: issue({ state_reason: "reopened" }), repository: tasks }, D);
+  assert.strictEqual(r.event.action, "reopened");
+  assert.strictEqual(r.event.state_reason, "reopened");
+  assert.strictEqual(normalize("issues", { action: "closed", issue: issue(), repository: tasks }, D).event.state_reason, null);
+});
+
+test("other issue actions are not published", () => {
+  for (const action of ["opened", "edited", "unlabeled", "assigned"]) {
+    assert.strictEqual(normalize("issues", { action, issue: issue(), label: { name: "x" }, repository: tasks }, D), null);
+  }
+});
+
+test("a created issue comment carries id, author and URL, never the body", () => {
+  const url = "https://github.com/kade-agent/tasks/issues/4#issuecomment-9";
+  const comment = { id: 9, user: { login: "enjay27" }, html_url: url, body: "DONE EB6 secret text" };
+  const r = normalize("issue_comment", { action: "created", issue: issue(), comment, repository: tasks }, D);
+  assert.strictEqual(r.subject, "github.kade-agent.tasks.issue.4.issue_comment");
+  assert.deepStrictEqual(r.event.comment, { id: 9, author: "enjay27", url });
+  assert.strictEqual(r.event.pr, null);
+  assert.strictEqual(r.event.issue, 4);
+  assert.ok(!JSON.stringify(r.event).includes("DONE EB6"));
+  assert.ok(!JSON.stringify(r.event).includes("SECRET"));
+  const gone = normalize("issue_comment", { action: "created", issue: issue(), comment: { ...comment, user: null }, repository: tasks }, D);
+  assert.strictEqual(gone.event.comment.author, null);
+});
+
+test("a comment on a PR goes on the PR subject", () => {
+  const comment = { id: 1, user: { login: "a" }, html_url: "u", body: "b" };
+  const r = normalize("issue_comment", { action: "created", issue: issue({ number: 341, pull_request: {} }), comment, repository }, D);
+  assert.strictEqual(r.subject, "github.stella-rain.app.pr.341.issue_comment");
+  assert.strictEqual(r.event.pr, 341);
+  assert.strictEqual(r.event.issue, null);
+});
+
+test("edited and deleted issue comments are not published", () => {
+  const comment = { id: 1, user: { login: "a" }, html_url: "u", body: "b" };
+  for (const action of ["edited", "deleted"]) {
+    assert.strictEqual(normalize("issue_comment", { action, issue: issue(), comment, repository: tasks }, D), null);
+  }
+});
+
+test("a dotted repository name is tokenised in issue subjects", () => {
+  const r = normalize("issues", { action: "labeled", issue: issue(), label: { name: "x" }, repository: { full_name: "kade-agent/.github" } }, D);
+  assert.ok(r.subject.startsWith("github.kade-agent._github.issue."));
 });
