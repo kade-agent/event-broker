@@ -159,3 +159,13 @@ test("a dotted repository name is tokenised in issue subjects", () => {
   const r = normalize("issues", { action: "labeled", issue: issue(), label: { name: "x" }, repository: { full_name: "kade-agent/.github" } }, D);
   assert.ok(r.subject.startsWith("github.kade-agent._github.issue."));
 });
+
+test("the owner is lower-cased in the subject; the repo name and the event's repo keep GitHub's case", () => {
+  const caps = { full_name: "Stella-Rain/App", default_branch: "main" };
+  const r = normalize("pull_request", { action: "closed", pull_request: pr, repository: caps }, D);
+  assert.strictEqual(r.subject, "github.stella-rain.App.pr.341.pull_request");
+  assert.strictEqual(r.event.repo, "Stella-Rain/App");
+  const i = normalize("issues", { action: "labeled", issue: { number: 4 }, label: { name: "x" },
+    repository: { full_name: "Kade-Agent/tasks", default_branch: "main" } }, D);
+  assert.ok(i.subject.startsWith("github.kade-agent.tasks.issue."), i.subject);
+});
