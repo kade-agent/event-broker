@@ -1,0 +1,12 @@
+{
+  "name": "event-broker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub webhook receiver on the NAS: verified PR events as an SSE stream with replay, for the dispatcher",
+  "main": "src/server.js",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  }
+}
