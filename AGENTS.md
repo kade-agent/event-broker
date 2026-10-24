@@ -26,7 +26,9 @@ overrides them.
 | `src/mergeable.js` | after a trigger: reads `mergeable_state` past `unknown`, publishes on change |
 | `src/receiver.js` | `node:http`: `POST /github`, `GET /healthz`; wiring and settings |
 | `nats/nats-server.conf` | JetStream, the three users and their permissions (design section 7) |
-| `scripts/setup-stream.js` | creates or updates stream `GITHUB` and consumer `dispatcher` |
+| `src/stream.js` | creates or updates stream `GITHUB` and consumer `dispatcher` at start |
+| `scripts/nkey.js` | prints a new NKey: seed (secret) and public key |
+| `.env.example` | the NAS's compose settings as placeholders; the real `.env` is never committed |
 | `test/` | unit tests; `test/integration/` runs only with `NATS_URL` set (CI starts nats-server) |
 | `Dockerfile`, `compose.yaml` | how it runs on the NAS |
 

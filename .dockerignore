@@ -3,3 +3,6 @@ data
 secrets
 test
 .git
+.env
+.env.*
+!.env.example

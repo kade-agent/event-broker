@@ -19,6 +19,48 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: npm ci
       - run: node --test
       - name: The image builds
         run: docker build -t event-broker:ci .
+
+  integration:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Make throwaway NKeys
+        run: |
+          r=$(node scripts/nkey.js); c=$(node scripts/nkey.js)
+          rs=$(echo "$r" | sed -n 1p); cs=$(echo "$c" | sed -n 1p)
+          echo "::add-mask::$rs"; echo "::add-mask::$cs"
+          {
+            echo "RECEIVER_SEED=$rs"; echo "RECEIVER_NKEY=$(echo "$r" | sed -n 2p)"
+            echo "CLOUD_SEED=$cs"; echo "CLOUD_NKEY=$(echo "$c" | sed -n 2p)"
+            echo "LAN_UNUSED_PASSWORD=$(node -e 'console.log(require("crypto").randomBytes(24).toString("hex"))')"
+          } >> "$GITHUB_ENV"
+      - name: Start nats-server with nats/nats-server.conf
+        run: |
+          docker run -d --name nats -p 4222:4222 -p 8080:8080 \
+            -e RECEIVER_NKEY -e CLOUD_NKEY -e LAN_UNUSED_PASSWORD \
+            -v "$PWD/nats:/etc/nats:ro" nats:2.15.1-alpine -c /etc/nats/nats-server.conf
+          for i in $(seq 30); do
+            if docker logs nats 2>&1 | grep -q "Server is ready"; then exit 0; fi
+            sleep 1
+          done
+          docker logs nats; exit 1
+      - name: Integration tests
+        env:
+          NATS_URL: nats://127.0.0.1:4222
+          NATS_WS_URL: ws://127.0.0.1:8080
+        run: node --test test/integration/
+      - name: Server log
+        if: always()
+        run: docker logs nats
