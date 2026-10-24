@@ -60,7 +60,7 @@ jobs:
         env:
           NATS_URL: nats://127.0.0.1:4222
           NATS_WS_URL: ws://127.0.0.1:8080
-        run: node --test test/integration/
+        run: node --test test/integration/*.test.js
       - name: Server log
         if: always()
         run: docker logs nats
