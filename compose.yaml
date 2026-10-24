@@ -1,25 +1,47 @@
-# On the NAS: put the two secrets in ./secrets (outside git), then `docker compose up -d --build`.
-# The NAS reverse proxy serves https://<nas domain>/ with TLS and forwards to port 8787.
+# On the NAS (README, "Deploying"): copy .env.example to .env and fill it in, put the three secrets
+# in ./secrets, then `docker compose up -d --build`. .env and secrets/ are outside git.
+# The NAS reverse proxy ends TLS for the domain: /github -> 127.0.0.1:8787, /nats -> 127.0.0.1:8080
+# (websocket). Port 4222 is bound to the NAS's LAN address only; the router never forwards it.
 services:
-  event-broker:
+  nats:
+    image: nats:2.15.1-alpine
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    restart: unless-stopped
+    environment:
+      RECEIVER_NKEY: ${RECEIVER_NKEY:?set in .env}
+      CLOUD_NKEY: ${CLOUD_NKEY:?set in .env}
+      LAN_UNUSED_PASSWORD: ${LAN_UNUSED_PASSWORD:?set in .env}
+    ports:
+      - "${LAN_ADDRESS:?set in .env}:4222:4222"
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./nats:/etc/nats:ro
+      - nats-data:/data
+
+  receiver:
     build: .
     restart: unless-stopped
+    depends_on: [nats]
     ports:
       - "127.0.0.1:8787:8787"
     environment:
+      APP_ID: ${APP_ID:?set in .env}
+      NATS_URL: nats://nats:4222
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
-      READ_TOKEN_FILE: /run/secrets/read_token
+      APP_PRIVATE_KEY_FILE: /run/secrets/app_private_key
+      NATS_NKEY_SEED_FILE: /run/secrets/receiver_nkey_seed
     secrets:
       - webhook_secret
-      - read_token
-    volumes:
-      - event-broker-data:/data
+      - app_private_key
+      - receiver_nkey_seed
 
 secrets:
   webhook_secret:
     file: ./secrets/webhook_secret
-  read_token:
-    file: ./secrets/read_token
+  app_private_key:
+    file: ./secrets/app_private_key.pem
+  receiver_nkey_seed:
+    file: ./secrets/receiver_nkey_seed
 
 volumes:
-  event-broker-data:
+  nats-data:
