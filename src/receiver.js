@@ -39,11 +39,17 @@ function createReceiver({ secret, publish, onTrigger, log = console.error }) {
     let payload;
     try { payload = JSON.parse(body.toString("utf8")); } catch { return send(res, 400); }
     const delivery = req.headers["x-github-delivery"] || null;
+    const name = typeof payload.action === "string" ? `${event}.${payload.action}` : event;
+    const tag = `${delivery || "-"} ${name} ->`;
     const out = normalize(event, payload, delivery);
     const trigger = mergeTrigger(event, payload);
-    if (!out && !trigger) return send(res, 204);
+    if (!out && !trigger) { log(`${tag} dropped`); return send(res, 204); }
     if (out) {
-      try { await publish(out.subject, out.event, delivery); } catch (e) { log(`publish ${out.subject}: ${e.message}`); return send(res, 503); }
+      let ack;
+      try { ack = await publish(out.subject, out.event, delivery); } catch (e) { log(`publish ${out.subject}: ${e.message}`); return send(res, 503); }
+      log(`${tag} ${ack && ack.duplicate ? "duplicate" : "published"} ${out.subject}`);
+    } else {
+      log(`${tag} trigger-only`);
     }
     if (trigger) Promise.resolve().then(() => onTrigger(trigger)).catch((e) => log(`mergeability: ${e.message}`));
     send(res, 202, { subject: out ? out.subject : null });
