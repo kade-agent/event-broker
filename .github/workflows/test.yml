@@ -31,7 +31,7 @@ jobs:
             grep -Eq "^RECEIVER_NKEY_$o=U[A-Z2-7]{55}$" .env
             grep -Eq "^READER_NKEY_$o=U[A-Z2-7]{55}$" .env
           done
-          ! grep -Eq '^(RECEIVER_NKEY|CLOUD_NKEY|LAN_UNUSED_PASSWORD)=' .env
+          if grep -Eq '^(RECEIVER_NKEY|CLOUD_NKEY|LAN_UNUSED_PASSWORD)=' .env; then echo 'old global keys left in .env'; exit 1; fi
           test "$(grep -c . secrets/receiver_seeds)" = 4
           test "$(stat -c %u secrets/receiver_seeds)" = 1000
           test "$(stat -c %u secrets/reader_kade-agent_seed)" = "$(id -u)"

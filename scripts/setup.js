@@ -71,9 +71,9 @@ function runSetup(dir, { log = console.log, isRoot = process.getuid ? process.ge
   // One receiver pair and one reader pair per owner: keep a valid seed file, else make one. The
   // public key in .env is always derived from the seed file.
   const seeds = {};
-  for (const owner of owners) {
+  for (const org of owners) {
     for (const kind of ["receiver", "reader"]) {
-      const file = `${kind}_${owner}_seed`;
+      const file = `${kind}_${org}_seed`;
       let seed = readSecret(file);
       if (!publicOf(seed)) {
         seed = dec.decode(nkeys.createUser().getSeed());
@@ -81,7 +81,7 @@ function runSetup(dir, { log = console.log, isRoot = process.getuid ? process.ge
         changed.push(`secrets/${file}`);
       }
       seeds[file] = seed;
-      set(`${kind.toUpperCase()}_NKEY_${envName(owner)}`, publicOf(seed));
+      set(`${kind.toUpperCase()}_NKEY_${envName(org)}`, publicOf(seed));
     }
   }
   // The receiver's seeds, the only ones mounted: one "<owner> <seed>" line per owner.
