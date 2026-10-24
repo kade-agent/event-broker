@@ -1,7 +1,9 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert");
-const { ensureStream } = require("../src/stream");
+const fs = require("node:fs");
+const path = require("node:path");
+const { ensureStream, streamFor } = require("../src/stream");
 
 // A jsm that records what it was asked, and knows only what was added.
 function fakeJsm({ stream = false, consumer = false } = {}) {
@@ -74,4 +76,16 @@ test("the owner is lower-cased in the subjects", async () => {
   const jsm = fakeJsm();
   await ensureStream(jsm, "Kade-Agent");
   assert.deepStrictEqual(jsm.calls.find((c) => c[0] === "streams.add")[1].subjects, ["github.kade-agent.>"]);
+});
+
+test("each stream reserves 128 MiB", () => {
+  assert.strictEqual(streamFor("stella-rain").max_bytes, 134217728);
+});
+
+test("four orgs use at most half of the server's max_file_store", () => {
+  const conf = fs.readFileSync(path.join(__dirname, "..", "nats", "nats-server.conf"), "utf8");
+  const m = /^\s*max_file_store:\s*(\d+)\s*(KB|MB|GB|TB)?\s*$/im.exec(conf);
+  assert.ok(m, "max_file_store is set in nats-server.conf");
+  const unit = { KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12 }[(m[2] || "").toUpperCase()] || 1; // the server's decimal units
+  assert.ok(4 * streamFor("stella-rain").max_bytes <= (Number(m[1]) * unit) / 2);
 });
