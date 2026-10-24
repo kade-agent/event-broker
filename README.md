@@ -7,9 +7,9 @@ consumer and messages each worker at once. The design lives in
 in kade-agent/agent-config.
 
 ```
-GitHub App webhook ─▶ receiver ─▶ JetStream stream GITHUB ─▶ consumer "dispatcher"
-  (HMAC checked)       │                                   ├─ LAN: nats://<LAN address>:4222, no key
-                       └─ after a push or PR update:       └─ cloud: wss://<nats host>, NKey
+GitHub App webhook ─▶ receiver ─▶ one NATS account per owner, each with JetStream stream GITHUB
+  (HMAC checked)       │          and consumer "dispatcher" (filtered) ─┬─ LAN: nats://<LAN address>:4222, reader NKey
+                       └─ after a push or PR update:                    └─ cloud: wss://<nats host>, reader NKey
                           reads mergeable_state, publishes "mergeable"
 ```
 
@@ -47,20 +47,24 @@ on that PR. A push to the default branch starts one on every open PR on that bas
 1. **Create the GitHub App** (organization settings → Developer settings → GitHub Apps):
    - Webhook URL: `https://<webhook host>/github`. Leave the webhook secret empty for now; step 3
      makes one.
-   - Repository permissions, all **read-only**: Metadata, Pull requests, Checks, Actions, Contents.
+   - Repository permissions, all **read-only**: Metadata, Pull requests, Checks, Actions, Contents,
+     Issues.
    - Subscribe to events: Pull request, Check suite, Check run, Workflow run, Pull request review,
-     Push.
-   - "Where can this GitHub App be installed?": **Only on this account**. The receiver has no owner
-     allowlist.
+     Push, Issues, Issue comment.
+   - "Where can this GitHub App be installed?": **Any account**. `ALLOWED_OWNERS` keeps every other
+     owner out: the receiver drops their deliveries with a 204.
    - Generate a private key (a `.pem` download), and note the App ID.
    - Install it on the organization: the App's page → **Install App**.
 2. **Put the App key** in the checkout on the NAS, at `secrets/app_private_key.pem`.
 3. **Run the setup:** `docker compose run --rm setup`. It:
-   - writes `.env` from `.env.example`, and makes both NKey pairs. The public keys are always
-     derived from the seeds, so a seed can never end up in `.env`;
-   - makes the webhook secret and the LAN password;
+   - writes `.env` from `.env.example`, and makes a receiver and a reader NKey pair for each owner in
+     `ALLOWED_OWNERS` (eight for four owners). The public keys are always derived from the seeds, so
+     a seed can never end up in `.env`; `secrets/receiver_seeds` holds the receivers' seeds, one
+     `<owner> <seed>` line each, and is the only seed file a container mounts;
+   - makes the webhook secret;
    - sets every secret to mode 600, owned by the containers' user;
-   - prints what changed and what is still to do, never a seed or a secret.
+   - prints what changed, what is still to do, and which `secrets/reader_<owner>_seed` file goes to
+     which org's dispatcher, never a seed or a secret.
 
    Run it again any time: it fixes what is wrong and keeps the rest.
 4. **Finish by hand:**
@@ -77,7 +81,10 @@ on that PR. A push to the default branch starts one on every open PR on that bas
    The router forwards only 443. Port 4222 stays on the LAN.
 6. **The dispatcher** runs `client/watch.sh` as its Monitor command (agent-config,
    `pr-watch.md`). It prints one event per line, and `BROKER-DOWN <why>` when it gives up.
-   - **Local:** `EVENT_BROKER_URL=nats://<LAN address>:4222`, no key. On Windows:
+   - One dispatcher per org, each with its own org's `reader-<owner>` key; there is no keyless
+     access. A reader sees only its own account's stream and consumer.
+   - **Local:** `EVENT_BROKER_URL=nats://<LAN address>:4222`, `EVENT_BROKER_NKEY_FILE` (the key file)
+     and `EVENT_BROKER_CLOUD_SEED` (the line in `secrets/reader_<owner>_seed`). On Windows:
      - install `nats.exe` from the natscli releases (`nats-0.5.0-windows-amd64.zip`) and put
        its folder on the user `PATH`;
      - set the URL with `setx`;
@@ -85,7 +92,7 @@ on that PR. A push to the default branch starts one on every open PR on that bas
    - **Cloud,** the environment's settings:
      - **Variables:** `EVENT_BROKER_URL=wss://<nats host>`,
        `EVENT_BROKER_NKEY_FILE=/root/.event-broker.nk`, and `EVENT_BROKER_CLOUD_SEED` (the line
-       in `secrets/cloud_seed`, which is never mounted into a container).
+       in that org's `secrets/reader_<owner>_seed`, which is never mounted into a container).
      - **Network access:** allows `<nats host>`.
      - **Setup script:** runs `client/install-nats.sh` from this repository (pinned natscli
        0.5.0), and nothing else:
@@ -96,16 +103,22 @@ on that PR. A push to the default branch starts one on every open PR on that bas
 7. **Check it:**
    - The App's "Recent deliveries" page shows the `ping` with a 200. A 401 means the App's webhook
      secret differs from `secrets/webhook_secret`.
-   - From the LAN: `nats --server nats://<LAN address>:4222 consumer info GITHUB dispatcher`
-     reads the consumer without taking an event.
+   - From the LAN: `nats --server nats://<LAN address>:4222 --nkey <reader key file> consumer info GITHUB dispatcher`
+     reads the org's consumer without taking an event.
+
+**Moving from the single-account broker:** the old global stream and its 7 days of events are not
+migrated; the dispatcher's gh sweep on each re-arm covers the gap. Run the setup, then recreate
+the containers; the old `receiver_nkey_seed` and `cloud_seed` files are no longer used and can be
+deleted.
 
 Replacing a key: delete its seed file in `secrets/`, run `docker compose run --rm setup`, then
-`docker compose up -d --force-recreate`. For the cloud key, also update the cloud environment's
-seed.
+`docker compose up -d --force-recreate`. For a reader key, also update that org's dispatcher's seed.
+Adding an owner: add it to `ALLOWED_OWNERS`, copy an account block in `nats/nats-server.conf`, add its
+two variables to the `nats` service in `compose.yaml`, then run the setup and recreate.
 
 ## Development
 
 - `npm ci && node --test` runs the unit tests. The integration tests in `test/integration/` skip
   unless a nats-server is running.
-- CI runs both, with throwaway NKeys and the real `nats/nats-server.conf`.
+- CI runs both, with throwaway NKeys for every owner and the real `nats/nats-server.conf`.
 - See `AGENTS.md` for the layout and the gates.
