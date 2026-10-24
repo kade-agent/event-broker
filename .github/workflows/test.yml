@@ -23,6 +23,16 @@ jobs:
       - run: node --test
       - name: The image builds
         run: docker build -t event-broker:ci .
+      - name: The setup command works in a fresh folder, and a second run changes nothing
+        run: |
+          mkdir -p secrets && echo "not a real key" > secrets/app_private_key.pem
+          docker compose run --rm setup
+          grep -Eq '^RECEIVER_NKEY=U[A-Z2-7]{55}$' .env
+          grep -Eq '^CLOUD_NKEY=U[A-Z2-7]{55}$' .env
+          test "$(stat -c %u secrets/receiver_nkey_seed)" = 1000
+          test "$(stat -c %u secrets/cloud_seed)" = "$(id -u)"
+          test "$(stat -c %a secrets/webhook_secret)" = 600
+          docker compose run --rm setup | grep -q "Nothing to change"
 
   integration:
     runs-on: ubuntu-latest

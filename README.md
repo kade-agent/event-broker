@@ -9,7 +9,7 @@ in kade-agent/agent-config.
 ```
 GitHub App webhook ─▶ receiver ─▶ JetStream stream GITHUB ─▶ consumer "dispatcher"
   (HMAC checked)       │                                   ├─ LAN: nats://<LAN address>:4222, no key
-                       └─ after a push or PR update:       └─ cloud: wss://<nas domain>/nats, NKey
+                       └─ after a push or PR update:       └─ cloud: wss://<nats host>, NKey
                           reads mergeable_state, publishes "mergeable"
 ```
 
@@ -45,37 +45,50 @@ on that PR. A push to the default branch starts one on every open PR on that bas
 ## Deploying on the NAS (Kade, once)
 
 1. **Create the GitHub App** (organization settings → Developer settings → GitHub Apps):
-   - Webhook URL: `https://<nas domain>/github`. Webhook secret: a long random string.
+   - Webhook URL: `https://<webhook host>/github`. Leave the webhook secret empty for now; step 3
+     makes one.
    - Repository permissions, all **read-only**: Metadata, Pull requests, Checks, Actions, Contents.
    - Subscribe to events: Pull request, Check suite, Check run, Workflow run, Pull request review,
      Push.
-   - Generate a private key (a `.pem` download), and note the App id.
-   - Install it on the stella-rain organization, for all repositories.
-2. **Make the NKeys** in a checkout on the NAS (`npm ci` first). Run `node scripts/nkey.js` twice,
-   once for `receiver` and once for `cloud`. Line 1 is the seed, which is secret; line 2 is the
-   public key.
-3. **Fill in `secrets/`:**
-   - `webhook_secret`
-   - `app_private_key.pem`
-   - `receiver_nkey_seed` (the receiver's line 1)
-   Keep the cloud seed for step 6 only.
-4. **Fill in `.env`** from `.env.example`: the LAN address, the App id, both public keys (line 2)
-   and a random `LAN_UNUSED_PASSWORD`.
-5. **Start it** with `docker compose up -d --build`. Then point the reverse proxy for the domain at it:
-   - `/github` → `127.0.0.1:8787`;
-   - `/nats` → `127.0.0.1:8080`, as a websocket upgrade.
+   - "Where can this GitHub App be installed?": **Only on this account**. The receiver has no owner
+     allowlist.
+   - Generate a private key (a `.pem` download), and note the App ID.
+   - Install it on the organization: the App's page → **Install App**.
+2. **Put the App key** in the checkout on the NAS, at `secrets/app_private_key.pem`.
+3. **Run the setup:** `docker compose run --rm setup`. It:
+   - writes `.env` from `.env.example`, and makes both NKey pairs. The public keys are always
+     derived from the seeds, so a seed can never end up in `.env`;
+   - makes the webhook secret and the LAN password;
+   - sets every secret to mode 600, owned by the containers' user;
+   - prints what changed and what is still to do, never a seed or a secret.
+
+   Run it again any time: it fixes what is wrong and keeps the rest.
+4. **Finish by hand:**
+   - in `.env`, set `APP_ID` (the App's page, "About") and `LAN_ADDRESS` (the NAS's LAN address);
+   - paste the contents of `secrets/webhook_secret` into the App's webhook secret, then save.
+5. **Start it:** `docker compose up -d --build`. Then give the reverse proxy one hostname per
+   route, each **one level** under a wildcard certificate (`*.<domain>` does not cover
+   `a.b.<domain>`):
+   - `<webhook host>` → `127.0.0.1:8787`;
+   - `<nats host>` → `127.0.0.1:8080`, with the WebSocket headers.
+
    The router forwards only 443. Port 4222 stays on the LAN.
 6. **The dispatcher:**
-   - **Local:** `EVENT_BROKER_URL=nats://<LAN address>:4222`, no key.
-   - **Cloud:** in the environment's private init script, write the cloud seed to a file with
-     `umask 077`, and set `EVENT_BROKER_URL=wss://<nas domain>/nats` and
-     `EVENT_BROKER_NKEY_FILE=<that file>`. Never echo the seed.
+   - **Local:** `EVENT_BROKER_URL=nats://<LAN address>:4222`, no key. On Windows, use `setx`,
+     then restart the Claude app.
+   - **Cloud:** the environment's variables are `EVENT_BROKER_URL=wss://<nats host>`,
+     `EVENT_BROKER_NKEY_FILE`, and `EVENT_BROKER_CLOUD_SEED`, which is the line in
+     `secrets/cloud_seed`. That file is never mounted into a container. Its setup script writes
+     the seed file (agent-config, `pr-watch.md`).
 7. **Check it:**
-   - The App's "Recent deliveries" page shows the `ping` with a 200.
-   - From the LAN: `nats --server nats://<LAN address>:4222 consumer next GITHUB dispatcher`
-     prints the next event after a PR changes.
+   - The App's "Recent deliveries" page shows the `ping` with a 200. A 401 means the App's webhook
+     secret differs from `secrets/webhook_secret`.
+   - From the LAN: `nats --server nats://<LAN address>:4222 consumer info GITHUB dispatcher`
+     reads the consumer without taking an event.
 
-Revoking a key: remove its public key from `.env`, then `docker compose up -d`.
+Replacing a key: delete its seed file in `secrets/`, run `docker compose run --rm setup`, then
+`docker compose up -d --force-recreate`. For the cloud key, also update the cloud environment's
+seed.
 
 ## Development
 
