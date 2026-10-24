@@ -27,6 +27,7 @@ overrides them.
 | `src/receiver.js` | `node:http`: `POST /github`, `GET /healthz`; wiring and settings |
 | `nats/nats-server.conf` | JetStream, the three users and their permissions (design section 7) |
 | `src/stream.js` | creates or updates stream `GITHUB` and consumer `dispatcher` at start |
+| `scripts/setup.js` | `docker compose run --rm setup`: .env, both NKey pairs, secrets and their owners |
 | `scripts/nkey.js` | prints a new NKey: seed (secret) and public key |
 | `.env.example` | the NAS's compose settings as placeholders; the real `.env` is never committed |
 | `test/` | unit tests; `test/integration/` runs only with `NATS_URL` set (CI starts nats-server) |
