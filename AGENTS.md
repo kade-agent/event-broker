@@ -29,6 +29,8 @@ overrides them.
 | `src/stream.js` | creates or updates stream `GITHUB` and consumer `dispatcher` at start |
 | `scripts/setup.js` | `docker compose run --rm setup`: .env, both NKey pairs, secrets and their owners |
 | `scripts/nkey.js` | prints a new NKey: seed (secret) and public key |
+| `client/watch.sh` | the dispatcher's watch (agent-config `pr-watch.md`): the consumer loop, the pidfile, the cloud seed |
+| `client/install-nats.sh` | installs the pinned natscli (0.5.0) in a cloud setup script |
 | `.env.example` | the NAS's compose settings as placeholders; the real `.env` is never committed |
 | `test/` | unit tests; `test/integration/` runs only with `NATS_URL` set (CI starts nats-server) |
 | `Dockerfile`, `compose.yaml` | how it runs on the NAS |
