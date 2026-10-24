@@ -27,10 +27,14 @@ jobs:
         run: |
           mkdir -p secrets && echo "not a real key" > secrets/app_private_key.pem
           docker compose run --rm setup
-          grep -Eq '^RECEIVER_NKEY=U[A-Z2-7]{55}$' .env
-          grep -Eq '^CLOUD_NKEY=U[A-Z2-7]{55}$' .env
-          test "$(stat -c %u secrets/receiver_nkey_seed)" = 1000
-          test "$(stat -c %u secrets/cloud_seed)" = "$(id -u)"
+          for o in KADE_K8S_PLATFORM KADE_AGENT STELLA_RAIN STAR_RESONANCE; do
+            grep -Eq "^RECEIVER_NKEY_$o=U[A-Z2-7]{55}$" .env
+            grep -Eq "^READER_NKEY_$o=U[A-Z2-7]{55}$" .env
+          done
+          ! grep -Eq '^(RECEIVER_NKEY|CLOUD_NKEY|LAN_UNUSED_PASSWORD)=' .env
+          test "$(grep -c . secrets/receiver_seeds)" = 4
+          test "$(stat -c %u secrets/receiver_seeds)" = 1000
+          test "$(stat -c %u secrets/reader_kade-agent_seed)" = "$(id -u)"
           test "$(stat -c %a secrets/webhook_secret)" = 600
           docker compose run --rm setup | grep -q "Nothing to change"
 
@@ -46,21 +50,23 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - name: Make throwaway NKeys
+      - name: Make throwaway NKeys, a receiver and a reader for each of the conf's four owners
         run: |
-          r=$(node scripts/nkey.js); c=$(node scripts/nkey.js)
-          rs=$(echo "$r" | sed -n 1p); cs=$(echo "$c" | sed -n 1p)
-          echo "::add-mask::$rs"; echo "::add-mask::$cs"
-          {
-            echo "RECEIVER_SEED=$rs"; echo "RECEIVER_NKEY=$(echo "$r" | sed -n 2p)"
-            echo "CLOUD_SEED=$cs"; echo "CLOUD_NKEY=$(echo "$c" | sed -n 2p)"
-            echo "LAN_UNUSED_PASSWORD=$(node -e 'console.log(require("crypto").randomBytes(24).toString("hex"))')"
-          } >> "$GITHUB_ENV"
+          for o in KADE_K8S_PLATFORM KADE_AGENT STELLA_RAIN STAR_RESONANCE; do
+            for kind in RECEIVER READER; do
+              k=$(node scripts/nkey.js); seed=$(echo "$k" | sed -n 1p)
+              echo "::add-mask::$seed"
+              echo "${kind}_NKEY_$o=$(echo "$k" | sed -n 2p)" >> "$RUNNER_TEMP/nats.env"
+              # The integration tests use kade-agent as account A and stella-rain as account B.
+              case "$o" in
+                KADE_AGENT) echo "${kind}_SEED_A=$seed" >> "$GITHUB_ENV" ;;
+                STELLA_RAIN) echo "${kind}_SEED_B=$seed" >> "$GITHUB_ENV" ;;
+              esac
+            done
+          done
       - name: Start nats-server with nats/nats-server.conf
         run: |
-          docker run -d --name nats -p 4222:4222 -p 8080:8080 \
-            -e RECEIVER_NKEY -e CLOUD_NKEY -e LAN_UNUSED_PASSWORD \
-            -v "$PWD/nats:/etc/nats:ro" nats:2.15.1-alpine -c /etc/nats/nats-server.conf
+          docker run -d --name nats -p 4222:4222 -p 8080:8080 --env-file "$RUNNER_TEMP/nats.env" -v "$PWD/nats:/etc/nats:ro" nats:2.15.1-alpine -c /etc/nats/nats-server.conf
           for i in $(seq 30); do
             if docker logs nats 2>&1 | grep -q "Server is ready"; then exit 0; fi
             sleep 1
@@ -75,19 +81,18 @@ jobs:
         run: |
           NATS_CLI_DIR="$RUNNER_TEMP/bin" bash client/install-nats.sh
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: client/watch.sh reads one event on the LAN (no key) and over websocket (seed written at run time)
+      - name: client/watch.sh reads one event with a reader key, on the LAN port and over websocket (seed written at run time)
         run: |
-          umask 077; printf '%s\n' "$RECEIVER_SEED" > "$RUNNER_TEMP/receiver.nk"
+          umask 077; printf '%s\n' "$RECEIVER_SEED_A" > "$RUNNER_TEMP/receiver.nk"
           pub() { nats --server nats://127.0.0.1:4222 --nkey "$RUNNER_TEMP/receiver.nk" pub "$1" "$2"; }
-          export WATCH_PIDFILE="$RUNNER_TEMP/watch.pid"
+          export WATCH_PIDFILE="$RUNNER_TEMP/watch.pid" EVENT_BROKER_CLOUD_SEED="$READER_SEED_A"
 
-          pub github.ci.watch.pr.1.pull_request '{"ci":"lan"}'
-          got=$(EVENT_BROKER_URL=nats://127.0.0.1:4222 timeout 30 bash client/watch.sh | head -n 1 || true)
+          pub github.kade-agent.watch.pr.1.pull_request '{"ci":"lan"}'
+          got=$(EVENT_BROKER_URL=nats://127.0.0.1:4222 EVENT_BROKER_NKEY_FILE="$RUNNER_TEMP/lan.nk" timeout 30 bash client/watch.sh | head -n 1 || true)
           echo "lan: $got"; test "$got" = '{"ci":"lan"}'
 
-          pub github.ci.watch.pr.2.pull_request '{"ci":"cloud"}'
-          got=$(EVENT_BROKER_URL=ws://127.0.0.1:8080 EVENT_BROKER_NKEY_FILE="$RUNNER_TEMP/cloud.nk" \
-            EVENT_BROKER_CLOUD_SEED="$CLOUD_SEED" timeout 30 bash client/watch.sh | head -n 1 || true)
+          pub github.kade-agent.watch.pr.2.pull_request '{"ci":"cloud"}'
+          got=$(EVENT_BROKER_URL=ws://127.0.0.1:8080 EVENT_BROKER_NKEY_FILE="$RUNNER_TEMP/cloud.nk" timeout 30 bash client/watch.sh | head -n 1 || true)
           echo "cloud: $got"; test "$got" = '{"ci":"cloud"}'
           test "$(stat -c %a "$RUNNER_TEMP/cloud.nk")" = 600
       - name: Server log
