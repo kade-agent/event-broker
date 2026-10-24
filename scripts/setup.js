@@ -75,7 +75,13 @@ function runSetup(dir, { log = console.log, isRoot = process.getuid ? process.ge
   }
 
   if (placeholder(get("LAN_UNUSED_PASSWORD"))) set("LAN_UNUSED_PASSWORD", crypto.randomBytes(24).toString("hex"));
-  for (const key of ["APP_ID", "LAN_ADDRESS"]) if (placeholder(get(key))) todo.push(key);
+  // compose reads every .env value for every service, so a "<…>" left here would break even this
+  // command's next run; empty makes compose use its default until Kade fills it in.
+  for (const key of ["APP_ID", "LAN_ADDRESS"]) {
+    if (!placeholder(get(key))) continue;
+    set(key, "");
+    todo.push(key);
+  }
   if (!fs.existsSync(at("app_private_key.pem"))) todo.push("secrets/app_private_key.pem");
 
   if (changed.length) fs.writeFileSync(envFile, lines.join("\n"), { mode: 0o600 });
