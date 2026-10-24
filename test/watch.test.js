@@ -18,6 +18,7 @@ if [ -z "$line" ]; then echo 0 > "$WATCH_PIDFILE"; echo "nats: error: no message
 tail -n +2 "$FAKE_DIR/queue" > "$FAKE_DIR/queue.next"; mv "$FAKE_DIR/queue.next" "$FAKE_DIR/queue"
 case "$line" in
   OK\\ *) echo "\${line#OK }"; exit 0 ;;
+  QUIET) echo "nats: error: no message received: nats: timeout"; exit 1 ;;
   TIMEOUT) echo "nats: error: no message received: timeout"; exit 1 ;;
   *) echo "nats: error: \${line#ERR }"; exit 1 ;;
 esac
@@ -44,8 +45,16 @@ const bashMissing = spawnSync("bash", ["-c", "true"]).status !== 0 && "bash is n
 test("events print one per line; a quiet minute is not an outage", { skip: bashMissing }, () => {
   const r = run(['OK {"pr":1}', "TIMEOUT", 'OK {"pr":2}']);
   assert.deepStrictEqual(r.stdout.trim().split("\n"), ['{"pr":1}', '{"pr":2}']);
-  assert.match(r.calls[0], /--server nats:\/\/broker\.test:4222 consumer next GITHUB dispatcher --raw --count 1 --wait 60s/);
+  assert.match(r.calls[0], /--server nats:\/\/broker\.test:4222 consumer next GITHUB dispatcher --raw --count 1 --timeout 60s$/);
+  assert.doesNotMatch(r.calls[0], /--wait/, "--wait only delays the ack; --timeout is the pull");
   assert.doesNotMatch(r.calls[0], /--nkey/, "no key on the LAN");
+});
+
+test("natscli 0.5.0's own quiet-minute text (cli/consumer_command.go:2333) is not an outage", { skip: bashMissing }, () => {
+  const r = run(['OK {"pr":1}', "QUIET", 'OK {"pr":2}']);
+  assert.deepStrictEqual(r.stdout.trim().split("\n"), ['{"pr":1}', '{"pr":2}']);
+  assert.doesNotMatch(r.stdout, /BROKER-DOWN/);
+  assert.strictEqual(r.status, 0);
 });
 
 test("two failures in a row print BROKER-DOWN and stop", { skip: bashMissing }, () => {

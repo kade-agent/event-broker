@@ -34,7 +34,7 @@ mkdir -p "$(dirname "$pid")"
 echo $$ > "$pid"
 fails=0
 while [ "$(cat "$pid" 2>/dev/null)" = "$$" ]; do
-  if out=$("$nats" --server "$url" ${key[@]+"${key[@]}"} consumer next GITHUB "$consumer" --raw --count 1 --wait 60s 2>&1); then
+  if out=$("$nats" --server "$url" ${key[@]+"${key[@]}"} consumer next GITHUB "$consumer" --raw --count 1 --timeout 60s 2>&1); then
     printf '%s\n' "$out"
     fails=0
   else
