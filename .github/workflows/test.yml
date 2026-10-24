@@ -71,6 +71,25 @@ jobs:
           NATS_URL: nats://127.0.0.1:4222
           NATS_WS_URL: ws://127.0.0.1:8080
         run: node --test test/integration/*.test.js
+      - name: client/install-nats.sh installs the pinned CLI
+        run: |
+          NATS_CLI_DIR="$RUNNER_TEMP/bin" bash client/install-nats.sh
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: client/watch.sh reads one event on the LAN (no key) and over websocket (seed written at run time)
+        run: |
+          umask 077; printf '%s\n' "$RECEIVER_SEED" > "$RUNNER_TEMP/receiver.nk"
+          pub() { nats --server nats://127.0.0.1:4222 --nkey "$RUNNER_TEMP/receiver.nk" pub "$1" "$2"; }
+          export WATCH_PIDFILE="$RUNNER_TEMP/watch.pid"
+
+          pub github.ci.watch.pr.1.pull_request '{"ci":"lan"}'
+          got=$(EVENT_BROKER_URL=nats://127.0.0.1:4222 timeout 30 bash client/watch.sh | head -n 1 || true)
+          echo "lan: $got"; test "$got" = '{"ci":"lan"}'
+
+          pub github.ci.watch.pr.2.pull_request '{"ci":"cloud"}'
+          got=$(EVENT_BROKER_URL=ws://127.0.0.1:8080 EVENT_BROKER_NKEY_FILE="$RUNNER_TEMP/cloud.nk" \
+            EVENT_BROKER_CLOUD_SEED="$CLOUD_SEED" timeout 30 bash client/watch.sh | head -n 1 || true)
+          echo "cloud: $got"; test "$got" = '{"ci":"cloud"}'
+          test "$(stat -c %a "$RUNNER_TEMP/cloud.nk")" = 600
       - name: Server log
         if: always()
         run: docker logs nats
