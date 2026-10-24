@@ -1,0 +1,25 @@
+# On the NAS: put the two secrets in ./secrets (outside git), then `docker compose up -d --build`.
+# The NAS reverse proxy serves https://<nas domain>/ with TLS and forwards to port 8787.
+services:
+  event-broker:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
+      READ_TOKEN_FILE: /run/secrets/read_token
+    secrets:
+      - webhook_secret
+      - read_token
+    volumes:
+      - event-broker-data:/data
+
+secrets:
+  webhook_secret:
+    file: ./secrets/webhook_secret
+  read_token:
+    file: ./secrets/read_token
+
+volumes:
+  event-broker-data:
