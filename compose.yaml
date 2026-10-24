@@ -1,5 +1,5 @@
 # On the NAS (README, "Deploying"): put the App key at secrets/app_private_key.pem, run
-# `docker compose run --rm setup` (it writes .env, the NKeys and the other secrets), fill in APP_ID and
+# `docker compose run --rm setup` (it writes .env, an NKey pair per owner and the other secrets), fill in APP_ID and
 # LAN_ADDRESS in .env, then `docker compose up -d --build`. .env and secrets/ are outside git.
 # The NAS reverse proxy ends TLS, one hostname each: the webhook -> 127.0.0.1:8787, NATS websocket ->
 # 127.0.0.1:8080. Port 4222 is bound to the NAS's LAN address only; the router never forwards it.
@@ -11,9 +11,14 @@ services:
     command: ["-c", "/etc/nats/nats-server.conf"]
     restart: unless-stopped
     environment:
-      RECEIVER_NKEY: ${RECEIVER_NKEY:-}
-      CLOUD_NKEY: ${CLOUD_NKEY:-}
-      LAN_UNUSED_PASSWORD: ${LAN_UNUSED_PASSWORD:-}
+      RECEIVER_NKEY_KADE_K8S_PLATFORM: ${RECEIVER_NKEY_KADE_K8S_PLATFORM:-}
+      RECEIVER_NKEY_KADE_AGENT: ${RECEIVER_NKEY_KADE_AGENT:-}
+      RECEIVER_NKEY_STELLA_RAIN: ${RECEIVER_NKEY_STELLA_RAIN:-}
+      RECEIVER_NKEY_STAR_RESONANCE: ${RECEIVER_NKEY_STAR_RESONANCE:-}
+      READER_NKEY_KADE_K8S_PLATFORM: ${READER_NKEY_KADE_K8S_PLATFORM:-}
+      READER_NKEY_KADE_AGENT: ${READER_NKEY_KADE_AGENT:-}
+      READER_NKEY_STELLA_RAIN: ${READER_NKEY_STELLA_RAIN:-}
+      READER_NKEY_STAR_RESONANCE: ${READER_NKEY_STAR_RESONANCE:-}
     ports:
       - "${LAN_ADDRESS:-127.0.0.1}:4222:4222"
       - "127.0.0.1:8080:8080"
@@ -33,11 +38,11 @@ services:
       NATS_URL: nats://nats:4222
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
       APP_PRIVATE_KEY_FILE: /run/secrets/app_private_key
-      NATS_NKEY_SEED_FILE: /run/secrets/receiver_nkey_seed
+      NATS_NKEY_SEEDS_FILE: /run/secrets/receiver_seeds
     secrets:
       - webhook_secret
       - app_private_key
-      - receiver_nkey_seed
+      - receiver_seeds
 
   # One-off: docker compose run --rm setup. Runs as root only to set file owners (scripts/setup.js).
   setup:
@@ -54,8 +59,8 @@ secrets:
     file: ./secrets/webhook_secret
   app_private_key:
     file: ./secrets/app_private_key.pem
-  receiver_nkey_seed:
-    file: ./secrets/receiver_nkey_seed
+  receiver_seeds:
+    file: ./secrets/receiver_seeds
 
 volumes:
   nats-data:

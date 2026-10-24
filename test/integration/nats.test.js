@@ -1,6 +1,8 @@
 "use strict";
 // Runs against a real nats-server started with nats/nats-server.conf (CI's integration job).
-// Needs NATS_URL, NATS_WS_URL, RECEIVER_SEED and CLOUD_SEED; skipped without them.
+// Needs NATS_URL, NATS_WS_URL and the throwaway seeds RECEIVER_SEED_A, READER_SEED_A,
+// RECEIVER_SEED_B, READER_SEED_B; skipped without them. Accounts A and B are the conf's first two
+// real owners below; their keys are made by CI, so nothing here is a real key.
 const test = require("node:test");
 const assert = require("node:assert");
 const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");
@@ -9,9 +11,14 @@ const { jetstream, jetstreamManager } = require("@nats-io/jetstream");
 const { ensureStream } = require("../../src/stream");
 
 const env = process.env;
-const skip = !(env.NATS_URL && env.NATS_WS_URL && env.RECEIVER_SEED && env.CLOUD_SEED) && "needs a nats-server (CI integration job)";
+const A = "kade-agent";
+const B = "stella-rain";
+const skip = !(env.NATS_URL && env.NATS_WS_URL && env.RECEIVER_SEED_A && env.READER_SEED_A && env.RECEIVER_SEED_B && env.READER_SEED_B)
+  && "needs a nats-server (CI integration job)";
 const seed = (s) => nkeyAuthenticator(new TextEncoder().encode(s));
 const opts = { timeout: 3000, reconnect: false };
+const lan = (s) => connect({ servers: env.NATS_URL, authenticator: seed(s), ...opts });
+const ws = (s) => wsconnect({ servers: env.NATS_WS_URL, authenticator: seed(s), ...opts });
 
 async function closes(promise) {
   let nc;
@@ -20,58 +27,84 @@ async function closes(promise) {
   try { await nc.request("$JS.API.INFO", "", { timeout: 1000 }); return false; } catch { return true; } finally { await nc.close().catch(() => {}); }
 }
 
+// The next message of consumer dispatcher, acked; null when none comes in 2 s.
 async function nextFrom(nc) {
-  const js = jetstream(nc);
-  const c = await js.consumers.get("GITHUB", "dispatcher");
-  const m = await c.next({ expires: 3000 });
-  assert.ok(m, "a message arrived");
+  const c = await jetstream(nc).consumers.get("GITHUB", "dispatcher");
+  const m = await c.next({ expires: 2000 });
+  if (!m) return null;
   m.ack();
   return { subject: m.subject, data: m.json() };
 }
 
-test("the receiver creates the stream and publishes; a repeated delivery is dropped", { skip }, async () => {
-  const nc = await connect({ servers: env.NATS_URL, authenticator: seed(env.RECEIVER_SEED), ...opts });
+test("each receiver makes its own account's stream and consumer, and a repeated delivery is dropped", { skip }, async () => {
+  for (const [owner, s] of [[A, env.RECEIVER_SEED_A], [B, env.RECEIVER_SEED_B]]) {
+    const nc = await lan(s);
+    try {
+      await ensureStream(await jetstreamManager(nc), owner);
+      await ensureStream(await jetstreamManager(nc), owner); // a restart updates in place
+      const info = await (await jetstreamManager(nc)).consumers.info("GITHUB", "dispatcher");
+      assert.strictEqual(info.config.filter_subjects.length, 8);
+    } finally { await nc.close(); }
+  }
+  const nc = await lan(env.RECEIVER_SEED_A);
   try {
-    await ensureStream(await jetstreamManager(nc));
-    await ensureStream(await jetstreamManager(nc)); // a restart updates in place
     const js = jetstream(nc);
-    const a = await js.publish("github.o.r.pr.1.pull_request", JSON.stringify({ pr: 1 }), { msgID: "guid-1" });
-    const b = await js.publish("github.o.r.pr.1.pull_request", JSON.stringify({ pr: 1 }), { msgID: "guid-1" });
+    const a = await js.publish(`github.${A}.r.pr.1.check_run`, JSON.stringify({ n: "check" }), { msgID: "guid-1" });
+    const b = await js.publish(`github.${A}.r.pr.1.check_run`, JSON.stringify({ n: "check" }), { msgID: "guid-1" });
     assert.strictEqual(a.duplicate, false);
     assert.strictEqual(b.duplicate, true);
-    await js.publish("github.o.r.pr.2.pull_request", JSON.stringify({ pr: 2 }), { msgID: "guid-2" });
+    await js.publish(`github.${A}.r.pr.1.workflow_run`, JSON.stringify({ n: "run" }), { msgID: "guid-2" });
   } finally { await nc.close(); }
 });
 
-test("a LAN connection with no key reads the dispatcher consumer", { skip }, async () => {
-  const nc = await connect({ servers: env.NATS_URL, ...opts });
+test("reader A, on the LAN port, gets only the workflow_run: the consumer filters out the check_run", { skip }, async () => {
+  const nc = await lan(env.READER_SEED_A);
   try {
     const got = await nextFrom(nc);
-    assert.strictEqual(got.subject, "github.o.r.pr.1.pull_request");
-    assert.deepStrictEqual(got.data, { pr: 1 });
+    assert.strictEqual(got.subject, `github.${A}.r.pr.1.workflow_run`);
+    assert.deepStrictEqual(got.data, { n: "run" });
+    assert.strictEqual(await nextFrom(nc), null);
   } finally { await nc.close(); }
 });
 
-test("a LAN connection cannot publish events", { skip }, async () => {
-  const nc = await connect({ servers: env.NATS_URL, ...opts });
+test("reader B sees nothing of account A", { skip }, async () => {
+  const nc = await lan(env.READER_SEED_B);
   try {
-    await assert.rejects(jetstream(nc).publish("github.o.r.pr.9.pull_request", "{}", { timeout: 1500 }));
+    assert.strictEqual(await nextFrom(nc), null);
+    const info = await (await jetstreamManager(nc)).streams.info("GITHUB");
+    assert.strictEqual(info.state.messages, 0);
   } finally { await nc.close(); }
 });
 
-test("a websocket connection with no key is refused", { skip }, async () => {
+test("receiver A cannot publish into account B's subjects", { skip }, async () => {
+  const nc = await lan(env.RECEIVER_SEED_A);
+  try {
+    await assert.rejects(jetstream(nc).publish(`github.${B}.r.pr.1.workflow_run`, "{}", { timeout: 1500 }));
+  } finally { await nc.close(); }
+});
+
+test("a reader cannot publish events", { skip }, async () => {
+  const nc = await lan(env.READER_SEED_A);
+  try {
+    await assert.rejects(jetstream(nc).publish(`github.${A}.r.pr.9.workflow_run`, "{}", { timeout: 1500 }));
+  } finally { await nc.close(); }
+});
+
+test("reader A reads over websocket", { skip }, async () => {
+  const pub = await lan(env.RECEIVER_SEED_A);
+  try { await jetstream(pub).publish(`github.${A}.r.pr.2.workflow_run`, JSON.stringify({ n: "ws" }), { msgID: "guid-3" }); } finally { await pub.close(); }
+  const nc = await ws(env.READER_SEED_A);
+  try {
+    const got = await nextFrom(nc);
+    assert.strictEqual(got.subject, `github.${A}.r.pr.2.workflow_run`);
+  } finally { await nc.close(); }
+});
+
+test("a connection with no key is refused on both ports", { skip }, async () => {
+  assert.ok(await closes(connect({ servers: env.NATS_URL, ...opts })));
   assert.ok(await closes(wsconnect({ servers: env.NATS_WS_URL, ...opts })));
 });
 
-test("a websocket connection with the cloud key reads the dispatcher consumer", { skip }, async () => {
-  const nc = await wsconnect({ servers: env.NATS_WS_URL, authenticator: seed(env.CLOUD_SEED), ...opts });
-  try {
-    const got = await nextFrom(nc);
-    assert.strictEqual(got.subject, "github.o.r.pr.2.pull_request");
-  } finally { await nc.close(); }
-});
-
-test("the cloud key is refused on a plain connection, and the receiver key on websocket", { skip }, async () => {
-  assert.ok(await closes(connect({ servers: env.NATS_URL, authenticator: seed(env.CLOUD_SEED), ...opts })));
-  assert.ok(await closes(wsconnect({ servers: env.NATS_WS_URL, authenticator: seed(env.RECEIVER_SEED), ...opts })));
+test("a receiver key is refused on websocket", { skip }, async () => {
+  assert.ok(await closes(ws(env.RECEIVER_SEED_A)));
 });

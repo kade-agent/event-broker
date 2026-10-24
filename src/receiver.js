@@ -72,6 +72,27 @@ const fileSetting = (name) => {
   return fs.readFileSync(file, "utf8").trim();
 };
 
+// "<owner> <seed>" per line (secrets/receiver_seeds, written by scripts/setup.js) -> { owner: seed }.
+function parseSeeds(text) {
+  const seeds = {};
+  for (const line of text.split("\n")) {
+    const [owner, seed] = line.trim().split(/\s+/);
+    if (owner && seed) seeds[owner.toLowerCase()] = seed;
+  }
+  return seeds;
+}
+
+// publish(subject, event, msgID) through the connection of the event's owner (event.repo before "/").
+// publishers: { owner: (subject, event, msgID) => Promise }.
+function publisherFor(publishers) {
+  return async (subject, event, msgID) => {
+    const owner = String(event.repo).split("/")[0].toLowerCase();
+    const publish = publishers[owner];
+    if (!publish) throw new Error(`no receiver connection for ${owner}`);
+    return publish(subject, event, msgID);
+  };
+}
+
 async function main() {
   const allowedOwners = (process.env.ALLOWED_OWNERS || "").split(",").map((o) => o.trim()).filter(Boolean);
   if (!allowedOwners.length) throw new Error("ALLOWED_OWNERS is not set");
@@ -81,14 +102,21 @@ async function main() {
   const { createApp } = require("./github-app");
   const { createMergeWatch } = require("./mergeable");
 
-  const nc = await connect({
-    servers: process.env.NATS_URL || "nats://nats:4222",
-    authenticator: nkeyAuthenticator(new TextEncoder().encode(fileSetting("NATS_NKEY_SEED_FILE"))),
-    maxReconnectAttempts: -1,
-  });
-  await ensureStream(await jetstreamManager(nc));
-  const js = jetstream(nc);
-  const publish = (subject, event, msgID) => js.publish(subject, JSON.stringify(event), msgID ? { msgID } : undefined);
+  // One connection per owner: each is a user of that owner's account, which holds its stream.
+  const seeds = parseSeeds(fileSetting("NATS_NKEY_SEEDS_FILE"));
+  const publishers = {};
+  for (const owner of allowedOwners.map((o) => o.toLowerCase())) {
+    if (!seeds[owner]) throw new Error(`no receiver seed for ${owner}`);
+    const nc = await connect({
+      servers: process.env.NATS_URL || "nats://nats:4222",
+      authenticator: nkeyAuthenticator(new TextEncoder().encode(seeds[owner])),
+      maxReconnectAttempts: -1,
+    });
+    await ensureStream(await jetstreamManager(nc), owner);
+    const js = jetstream(nc);
+    publishers[owner] = (subject, event, msgID) => js.publish(subject, JSON.stringify(event), msgID ? { msgID } : undefined);
+  }
+  const publish = publisherFor(publishers);
 
   if (!process.env.APP_ID) throw new Error("APP_ID is not set");
   const app = createApp({ appId: process.env.APP_ID, privateKey: fileSetting("APP_PRIVATE_KEY_FILE") });
@@ -100,4 +128,4 @@ async function main() {
 
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
 
-module.exports = { createReceiver };
+module.exports = { createReceiver, parseSeeds, publisherFor };
