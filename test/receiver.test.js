@@ -11,23 +11,25 @@ const pr = { number: 7, merged: true, draft: false, auto_merge: null, head: { re
 async function start({ publish, onTrigger = () => {} } = {}) {
   const published = [];
   const triggers = [];
+  const logs = [];
   const server = createReceiver({
     secret,
     publish: publish || (async (subject, event, msgId) => { published.push({ subject, event, msgId }); }),
     onTrigger: (t) => { triggers.push(t); onTrigger(t); },
+    log: (line) => logs.push(line),
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
-  return { base, published, triggers, close: () => new Promise((r) => server.close(r)) };
+  return { base, published, triggers, logs, close: () => new Promise((r) => server.close(r)) };
 }
 
-function deliver(base, event, payload, { sig, delivery = "guid-1" } = {}) {
+function deliver(base, event, payload, { sig, delivery = "guid-1", noGuid = false } = {}) {
   const body = JSON.stringify(payload);
   const signature = sig ?? "sha256=" + crypto.createHmac("sha256", secret).update(body).digest("hex");
   return fetch(`${base}/github`, {
     method: "POST",
     body,
-    headers: { "content-type": "application/json", "x-github-event": event, "x-github-delivery": delivery, "x-hub-signature-256": signature },
+    headers: { "content-type": "application/json", "x-github-event": event, ...(noGuid ? {} : { "x-github-delivery": delivery }), "x-hub-signature-256": signature },
   });
 }
 
@@ -98,5 +100,52 @@ test("bad JSON with a good signature gets 400; healthz answers 200; anything els
     assert.strictEqual(res.status, 400);
     assert.strictEqual((await fetch(`${s.base}/healthz`)).status, 200);
     assert.strictEqual((await fetch(`${s.base}/events`)).status, 404);
+  } finally { await s.close(); }
+});
+
+test("a merge logs one published line; a duplicate PubAck logs a duplicate line", async () => {
+  const s = await start();
+  try {
+    await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository }, { delivery: "abc-123" });
+    assert.deepStrictEqual(s.logs, ["abc-123 pull_request.closed -> published github.stella-rain.app.pr.7.pull_request"]);
+  } finally { await s.close(); }
+  const d = await start({ publish: async () => ({ duplicate: true }) });
+  try {
+    await deliver(d.base, "pull_request", { action: "closed", pull_request: pr, repository }, { delivery: "abc-123" });
+    assert.deepStrictEqual(d.logs, ["abc-123 pull_request.closed -> duplicate github.stella-rain.app.pr.7.pull_request"]);
+  } finally { await d.close(); }
+});
+
+test("a dropped, a trigger-only and a push delivery each log one line", async () => {
+  const s = await start();
+  try {
+    await deliver(s.base, "issues", { action: "opened", repository });
+    await deliver(s.base, "pull_request", { action: "synchronize", pull_request: pr, repository });
+    await deliver(s.base, "push", { ref: "refs/heads/main", after: "d", repository });
+    assert.deepStrictEqual(s.logs, [
+      "guid-1 issues.opened -> dropped",
+      "guid-1 pull_request.synchronize -> trigger-only",
+      `guid-1 push -> published ${s.published[0].subject}`,
+    ]);
+  } finally { await s.close(); }
+});
+
+test("a ping, a bad signature and a missing GUID", async () => {
+  const s = await start();
+  try {
+    await deliver(s.base, "ping", { zen: "z" });
+    await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository }, { sig: "sha256=" + "0".repeat(64) });
+    assert.deepStrictEqual(s.logs, []);
+    await deliver(s.base, "issues", { action: "opened", repository }, { noGuid: true });
+    assert.deepStrictEqual(s.logs, ["- issues.opened -> dropped"]);
+  } finally { await s.close(); }
+});
+
+test("a publish that throws logs only the publish error line", async () => {
+  const s = await start({ publish: async () => { throw new Error("nats down"); } });
+  try {
+    const res = await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository });
+    assert.strictEqual(res.status, 503);
+    assert.deepStrictEqual(s.logs, ["publish github.stella-rain.app.pr.7.pull_request: nats down"]);
   } finally { await s.close(); }
 });
