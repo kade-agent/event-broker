@@ -1,18 +1,21 @@
-# On the NAS (README, "Deploying"): copy .env.example to .env and fill it in, put the three secrets
-# in ./secrets, then `docker compose up -d --build`. .env and secrets/ are outside git.
-# The NAS reverse proxy ends TLS for the domain: /github -> 127.0.0.1:8787, /nats -> 127.0.0.1:8080
-# (websocket). Port 4222 is bound to the NAS's LAN address only; the router never forwards it.
+# On the NAS (README, "Deploying"): put the App key at secrets/app_private_key.pem, run
+# `docker compose run --rm setup` (it writes .env, the NKeys and the other secrets), fill in APP_ID and
+# LAN_ADDRESS in .env, then `docker compose up -d --build`. .env and secrets/ are outside git.
+# The NAS reverse proxy ends TLS, one hostname each: the webhook -> 127.0.0.1:8787, NATS websocket ->
+# 127.0.0.1:8080. Port 4222 is bound to the NAS's LAN address only; the router never forwards it.
+# The settings default to empty so that `setup` can run before .env is complete: until it is,
+# nats refuses the empty keys and the receiver says which setting is missing.
 services:
   nats:
     image: nats:2.15.1-alpine
     command: ["-c", "/etc/nats/nats-server.conf"]
     restart: unless-stopped
     environment:
-      RECEIVER_NKEY: ${RECEIVER_NKEY:?set in .env}
-      CLOUD_NKEY: ${CLOUD_NKEY:?set in .env}
-      LAN_UNUSED_PASSWORD: ${LAN_UNUSED_PASSWORD:?set in .env}
+      RECEIVER_NKEY: ${RECEIVER_NKEY:-}
+      CLOUD_NKEY: ${CLOUD_NKEY:-}
+      LAN_UNUSED_PASSWORD: ${LAN_UNUSED_PASSWORD:-}
     ports:
-      - "${LAN_ADDRESS:?set in .env}:4222:4222"
+      - "${LAN_ADDRESS:-127.0.0.1}:4222:4222"
       - "127.0.0.1:8080:8080"
     volumes:
       - ./nats:/etc/nats:ro
@@ -25,7 +28,7 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
     environment:
-      APP_ID: ${APP_ID:?set in .env}
+      APP_ID: ${APP_ID:-}
       NATS_URL: nats://nats:4222
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
       APP_PRIVATE_KEY_FILE: /run/secrets/app_private_key
@@ -34,6 +37,16 @@ services:
       - webhook_secret
       - app_private_key
       - receiver_nkey_seed
+
+  # One-off: docker compose run --rm setup. Runs as root only to set file owners (scripts/setup.js).
+  setup:
+    profiles: ["setup"]
+    build: .
+    user: "0:0"
+    working_dir: /work
+    volumes:
+      - .:/work
+    command: ["node", "/app/scripts/setup.js", "/work"]
 
 secrets:
   webhook_secret:
