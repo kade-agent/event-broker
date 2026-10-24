@@ -41,6 +41,10 @@ test("a fresh folder gets .env from the example, both NKey pairs, a webhook secr
   assert.match(env.LAN_UNUSED_PASSWORD, /^[0-9a-f]{48}$/);
   assert.ok(fs.readFileSync(path.join(dir, ".env"), "utf8").startsWith("# comment kept"), "comments kept");
   assert.deepStrictEqual(r.todo.sort(), ["APP_ID", "LAN_ADDRESS", "secrets/app_private_key.pem"]);
+  // compose reads .env for every service: a "<…>" left in LAN_ADDRESS is an invalid IP, and stops
+  // even a second `docker compose run --rm setup` (CI, 2026-10-24). Empty falls back to the default.
+  assert.strictEqual(env.LAN_ADDRESS, "");
+  assert.strictEqual(env.APP_ID, "");
 });
 
 test("a second run changes nothing", () => {
