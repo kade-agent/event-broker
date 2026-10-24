@@ -7,7 +7,7 @@ const { prefix, blank, prFields } = require("./normalize");
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function createMergeWatch({ gh, publish, sleep = wait, maxTries = 6, baseDelayMs = 2000, onError = (e) => console.error(e.message) }) {
+function createMergeWatch({ gh, publish, sleep = wait, maxTries = 6, baseDelayMs = 2000, onError = (e) => console.error(e.message), log = console.error }) {
   const last = new Map(); // "owner/repo#n" -> state
 
   async function read(repo, n) {
@@ -25,8 +25,11 @@ function createMergeWatch({ gh, publish, sleep = wait, maxTries = 6, baseDelayMs
     const key = `${repo}#${n}`;
     if (last.get(key) === pr.mergeable_state) return;
     const event = { ...blank(null, repo), ...prFields(pr), event: "mergeable", mergeable_state: pr.mergeable_state };
-    await publish(`${prefix(repo)}.pr.${n}.mergeable`, event, `mergeable:${key}:${pr.head.sha}:${pr.mergeable_state}`);
+    const subject = `${prefix(repo)}.pr.${n}.mergeable`;
+    const msgID = `mergeable:${key}:${pr.head.sha}:${pr.mergeable_state}`;
+    const ack = await publish(subject, event, msgID);
     last.set(key, pr.mergeable_state);
+    log(`${msgID} mergeable.${pr.mergeable_state} -> ${ack && ack.duplicate ? "duplicate" : "published"} ${subject}`);
   }
 
   return {
