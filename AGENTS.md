@@ -1,10 +1,17 @@
 # kade-agent/event-broker
 
-A small Node service on Kade's NAS. GitHub sends webhook deliveries to `POST /github`. The service
-checks each delivery's HMAC signature and turns it into one JSON line. It stores the line and
-streams it to subscribers on `GET /events` (SSE, bearer token, `Last-Event-ID` replay). Its only
-client is the dispatcher's PR watch, described in `agent-skills/dispatcher/references/pr-watch.md`
-in kade-agent/agent-config. Keep the event format in step with that file.
+The NAS side of the dispatcher's PR events. The design is `docs/event-broker-design.md` in
+kade-agent/agent-config, a living doc: a change to the design is made there first. The
+dispatcher's side is `agent-skills/dispatcher/references/pr-watch.md` there.
+
+- A GitHub App (read-only) sends webhook deliveries to `POST /github`.
+- The receiver checks the HMAC, normalizes the event and publishes it to NATS JetStream (stream
+  `GITHUB`, subjects `github.>`, the delivery GUID as the message id).
+- After a push to a default branch or a PR `synchronize`, it reads the open PRs'
+  `mergeable_state` with an App installation token, and publishes a `mergeable` event when the
+  state changes.
+- The dispatcher reads through a durable consumer: on the LAN with no key, from the cloud over
+  websocket with an NKey.
 
 The global rules (`~/.claude/AGENTS.md`) and the `repo-workflow` skill apply. Nothing here
 overrides them.
@@ -14,32 +21,39 @@ overrides them.
 | Path | What |
 |---|---|
 | `src/verify.js` | `X-Hub-Signature-256` check, constant time |
-| `src/normalize.js` | GitHub event to `{repo, pr, branch, event, action, merged, conclusion, sha}`, or `null` to drop it |
-| `src/store.js` | Append-only JSONL in `DATA_DIR`; ids only increase, kept for the last 5000 events or 7 days |
-| `src/server.js` | `node:http` server: `POST /github`, `GET /events`, `GET /healthz` |
-| `test/` | `node --test` tests, one file per module |
-| `Dockerfile`, `compose.yaml` | How it runs on the NAS |
+| `src/normalize.js` | delivery -> `{subject, event}` (design section 4), or `null` to drop it |
+| `src/github-app.js` | App JWT (RS256, `node:crypto`), installation token cache, `GET` helper |
+| `src/mergeable.js` | after a trigger: reads `mergeable_state` past `unknown`, publishes on change |
+| `src/receiver.js` | `node:http`: `POST /github`, `GET /healthz`; wiring and settings |
+| `nats/nats-server.conf` | JetStream, the three users and their permissions (design section 7) |
+| `scripts/setup-stream.js` | creates or updates stream `GITHUB` and consumer `dispatcher` |
+| `test/` | unit tests; `test/integration/` runs only with `NATS_URL` set (CI starts nats-server) |
+| `Dockerfile`, `compose.yaml` | how it runs on the NAS |
 
-No runtime dependencies: a new one is Kade's call.
+Runtime dependencies: `@nats-io/transport-node` and `@nats-io/jetstream` (Kade, 2026-10-24),
+pinned exactly. Another one is Kade's call.
 
 ## Settings
 
-All of them come from the environment. Secrets are files outside git, never values in a URL.
+All of them come from the environment. Secrets are files outside git.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WEBHOOK_SECRET_FILE` | (required) | The org webhook's secret |
-| `READ_TOKEN_FILE` | (required) | The bearer token subscribers send |
-| `PORT` | `8787` | Listen port behind the NAS reverse proxy (TLS there) |
-| `DATA_DIR` | `./data` | Where `events.jsonl` lives |
+| `WEBHOOK_SECRET_FILE` | (required) | the App's webhook secret |
+| `APP_ID` | (required) | the GitHub App's id |
+| `APP_PRIVATE_KEY_FILE` | (required) | the App's private key (PEM) |
+| `NATS_URL` | `nats://nats:4222` | the NATS server, inside compose |
+| `NATS_NKEY_SEED_FILE` | (required) | the `receiver` user's NKey seed |
+| `PORT` | `8787` | listen port behind the NAS reverse proxy (TLS there) |
 
 ## Gates
 
 | Part | Gate |
 |---|---|
-| `src/`, `test/`, `package.json` | `node --test` (CI: `test.yml`) |
-| `Dockerfile`, `compose.yaml` | `docker build .`; NOT VERIFIED where Docker is not installed |
-| A live delivery and the dispatcher's subscription | After deploy on the NAS (Kade) |
+| `src/`, `test/`, `scripts/`, `package.json` | `npm ci && node --test` (CI: `test.yml`) |
+| `nats/nats-server.conf` | CI's integration job against a real nats-server; NOT VERIFIED locally without it |
+| `Dockerfile`, `compose.yaml` | `docker build .` in CI; NOT VERIFIED where Docker is not installed |
+| A live delivery, the proxy routes, a cloud subscription | after Kade's deploy on the NAS |
 | `.github/workflows/` | YAML parses; NOT VERIFIED until they have run on GitHub |
 
 ## Version control

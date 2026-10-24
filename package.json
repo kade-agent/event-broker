@@ -2,11 +2,17 @@
   "name": "event-broker",
   "version": "0.1.0",
   "private": true,
-  "description": "GitHub webhook receiver on the NAS: verified PR events as an SSE stream with replay, for the dispatcher",
-  "main": "src/server.js",
-  "engines": { "node": ">=22" },
+  "description": "GitHub App webhook receiver on the NAS: verified PR events, and PR mergeability, published to NATS JetStream for the dispatcher",
+  "main": "src/receiver.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node src/receiver.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/transport-node": "3.4.0"
   }
 }
