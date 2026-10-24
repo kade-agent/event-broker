@@ -7,9 +7,10 @@
 // A NATS subject token may not hold ".", "*", ">" or whitespace.
 const token = (s) => String(s).replace(/[.*>\s]/g, "_");
 
+// Only the owner is lower-cased: it picks the NATS account and its stream; repo names stay as sent.
 const prefix = (fullName) => {
   const [owner, name] = fullName.split("/");
-  return `github.${token(owner)}.${token(name)}`;
+  return `github.${token(owner.toLowerCase())}.${token(name)}`;
 };
 
 const blank = (delivery, repo) => ({
