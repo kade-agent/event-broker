@@ -111,6 +111,14 @@ migrated; the dispatcher's gh sweep on each re-arm covers the gap. Run the setup
 the containers; the old `receiver_nkey_seed` and `cloud_seed` files are no longer used and can be
 deleted.
 
+**Upgrading:** on the NAS, run `git pull`, `docker compose build` (the setup runs the image, so an
+old image runs the old setup), `docker compose run --rm setup`, then
+`docker compose up -d --force-recreate`. A local edit of `nats/nats-server.conf` is reverted with
+`git checkout nats/nats-server.conf` before the `git pull`. Each org's stream reserves 128 MiB, so
+four fit the server's 1 GB file store with room for two more. Coming from the single global stream:
+run `docker compose down`, delete `jetstream/$G/streams/GITHUB` in the `nats-data` volume (its
+events are not migrated; the dispatcher's gh sweep covers the gap), then start again.
+
 Replacing a key: delete its seed file in `secrets/`, run `docker compose run --rm setup`, then
 `docker compose up -d --force-recreate`. For a reader key, also update that org's dispatcher's seed.
 Adding an owner: add it to `ALLOWED_OWNERS`, copy an account block in `nats/nats-server.conf`, add its

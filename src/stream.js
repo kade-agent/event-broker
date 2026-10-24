@@ -12,7 +12,7 @@ const streamFor = (owner) => ({
   subjects: [`github.${owner}.>`],
   storage: StorageType.File,
   max_age: 7 * 24 * 3600 * SECOND,
-  max_bytes: 512 * 1024 * 1024,
+  max_bytes: 128 * 1024 * 1024,
   discard: DiscardPolicy.Old,
   duplicate_window: 120 * SECOND,
 });
