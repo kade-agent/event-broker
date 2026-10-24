@@ -65,6 +65,8 @@ on that PR. A push to the default branch starts one on every open PR on that bas
    Run it again any time: it fixes what is wrong and keeps the rest.
 4. **Finish by hand:**
    - in `.env`, set `APP_ID` (the App's page, "About") and `LAN_ADDRESS` (the NAS's LAN address);
+   - in `.env`, check `ALLOWED_OWNERS` (the owners whose deliveries are accepted, comma-separated, case
+     insensitive; any other owner gets 204). The receiver refuses to start without it;
    - paste the contents of `secrets/webhook_secret` into the App's webhook secret, then save.
 5. **Start it:** `docker compose up -d --build`. Then give the reverse proxy one hostname per
    route, each **one level** under a wildcard certificate (`*.<domain>` does not cover
