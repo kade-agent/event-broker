@@ -39,7 +39,7 @@ function createReceiver({ secret, publish, onTrigger, log = console.error }) {
     let payload;
     try { payload = JSON.parse(body.toString("utf8")); } catch { return send(res, 400); }
     const delivery = req.headers["x-github-delivery"] || null;
-    const name = typeof payload.action === "string" ? `${event}.${payload.action}` : event;
+    const name = typeof payload?.action === "string" ? `${event}.${payload.action}` : event;
     const tag = `${delivery || "-"} ${name} ->`;
     const out = normalize(event, payload, delivery);
     const trigger = mergeTrigger(event, payload);

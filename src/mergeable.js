@@ -28,8 +28,8 @@ function createMergeWatch({ gh, publish, sleep = wait, maxTries = 6, baseDelayMs
     const subject = `${prefix(repo)}.pr.${n}.mergeable`;
     const msgID = `mergeable:${key}:${pr.head.sha}:${pr.mergeable_state}`;
     const ack = await publish(subject, event, msgID);
-    log(`${msgID} mergeable.${pr.mergeable_state} -> ${ack && ack.duplicate ? "duplicate" : "published"} ${subject}`);
     last.set(key, pr.mergeable_state);
+    log(`${msgID} mergeable.${pr.mergeable_state} -> ${ack && ack.duplicate ? "duplicate" : "published"} ${subject}`);
   }
 
   return {
