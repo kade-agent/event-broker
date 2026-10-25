@@ -24,9 +24,12 @@ function fakeFs(files = {}) {
 const resolve = (over = {}) => resolveSettings({ argv: ["--owner", "kade-agent"], env: { EVENT_BROKER_URL: "nats://lan:4222" }, home: HOME, fs: fakeFs({ [`${HOME}/.claude/dispatcher/kade-agent.nk`]: "SUASEED\n" }), platform: "linux", ...over });
 const fatal = (code, re) => (e) => e instanceof Fatal && e.exitCode === code && re.test(e.message);
 
-test("arguments: --owner, --profile and --json", () => {
-  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json"]), { owner: "a", profile: "all", json: true });
-  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false });
+test("arguments: --owner, --profile, --json and --window", () => {
+  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0 });
+  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30 });
+  assert.throws(() => parseArgs(["--window", "x"]), fatal(2, /--window/));
+  assert.throws(() => parseArgs(["--window", "-1"]), fatal(2, /--window/));
+  assert.throws(() => parseArgs(["--window"]), fatal(2, /--window/));
   assert.throws(() => parseArgs(["--nope"]), fatal(2, /--nope/));
   assert.throws(() => parseArgs(["--owner"]), fatal(2, /--owner/));
 });
@@ -55,10 +58,12 @@ test("settings: --owner wins over EVENT_BROKER_OWNER; the owner may come from th
   assert.throws(() => resolve({ argv: [], env: { EVENT_BROKER_URL: "u" } }), fatal(2, /--owner/));
 });
 
-test("settings: the profile defaults to dispatcher; --json is carried", () => {
+test("settings: the profile defaults to dispatcher; --json and --window are carried", () => {
   const s = resolve({ argv: ["--owner", "kade-agent", "--json"] });
   assert.strictEqual(s.profile, "dispatcher");
   assert.strictEqual(s.json, true);
+  assert.strictEqual(s.window, 30);
+  assert.strictEqual(resolve({ argv: ["--owner", "kade-agent", "--window", "0"] }).window, 0);
   assert.strictEqual(resolve({ argv: ["--owner", "kade-agent", "--profile", "all"] }).profile, "all");
 });
 
@@ -181,7 +186,8 @@ const ev = (seq, over = {}) => ({ seq, data: msg({ signal: "pr_merged", repo: "a
 
 // queue items: a message, null (a quiet minute) or an Error (a failed pull). When it runs dry the
 // harness aborts the run, and the pull never resolves (the real one would block for a minute).
-function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owner = "kade-agent", writeFails = false, connectFails = 0, pidText = "4242\n" } = {}) {
+// window 0: one line per event, as the tests before decision 17 expect; the summary tests pass 30.
+function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owner = "kade-agent", writeFails = false, connectFails = 0, pidText = "4242\n", window = 0 } = {}) {
   const h = { out: [], calls: [], clock: 0, ticks: [], queue: [...queue], connects: 0, nexts: 0, sleeps: [] };
   const ac = new AbortController();
   const fs = fakeFs({ "/p/watch.pid": pidText });
@@ -201,7 +207,7 @@ function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owne
   };
   h.conn = conn;
   h.deps = {
-    settings: { owner, profile: "dispatcher", json: false, pidFile: "/p/watch.pid" },
+    settings: { owner, profile: "dispatcher", json: false, window, pidFile: "/p/watch.pid" },
     connect: async (hooks) => {
       h.hooks = hooks;
       if (h.connects++ < connectFails) throw new Error("connect refused");
@@ -426,4 +432,87 @@ test("ending: a connect that finishes after the run ended is closed", async () =
   for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
   assert.ok(h.calls.includes("close"));
   assert.strictEqual(h.out.length, 0);
+});
+
+// ---- decision 17: the 30 s summary ----
+
+const { formatSummary } = require("../client/watch-core");
+
+test("summary line: entries in first-seen order, repeats of signal+target+check are the latest with count=", () => {
+  const a = msg({ signal: "main_failed", repo: "a/b", branch: "main", check: { name: "Rust", url: null }, delivery: "D1" });
+  const b = msg({ signal: "pr_merged", repo: "a/b", pr: 3, delivery: "D2" });
+  const a2 = { ...a, delivery: "D3" };
+  const c = msg({ signal: "main_failed", repo: "a/b", branch: "main", check: { name: "Lint", url: null }, delivery: "D4" });
+  assert.strictEqual(formatSummary([a, b, a2, c], false),
+    "SUMMARY 4 events | main_failed a/b@main check=Rust delivery=D3 count=2 | pr_merged a/b#3 delivery=D2 | main_failed a/b@main check=Lint delivery=D4");
+  assert.strictEqual(formatSummary([b], false), "SUMMARY 1 event | pr_merged a/b#3 delivery=D2");
+});
+
+test("summary line: --json is one object with every event, ungrouped", () => {
+  const b = msg({ signal: "pr_merged", repo: "a/b", pr: 3 });
+  assert.deepStrictEqual(JSON.parse(formatSummary([b, b], true)), { summary: true, count: 2, events: [b, b] });
+});
+
+// A run whose pull hands out the queue, then blocks; the test drives the clock and the ticks.
+async function summaryRun(h, items) {
+  const queue = items.map((m) => ({ ...m, ack: async () => { h.calls.push(`ack:${m.seq}`); } }));
+  h.conn.next = async () => { h.nexts++; return queue.length ? queue.shift() : new Promise(() => {}); };
+  const done = run(h.deps);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  return { done };
+}
+
+test("summary: events of one window are one line after 30 s, acked after it; nothing before", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  const { done: p } = await summaryRun(h, [ev(1), ev(2)]);
+  await tickAt(h, 29000);
+  assert.deepStrictEqual(h.out, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=0"]);
+  assert.ok(!h.calls.some((c) => c.startsWith("ack")));
+  await tickAt(h, 30000);
+  assert.strictEqual(h.out[1], "SUMMARY 2 events | pr_merged a/b#1 delivery=D1 | pr_merged a/b#2 delivery=D2");
+  assert.deepStrictEqual(h.calls.filter((c) => c !== "close").slice(-3), ["write:SUMMARY", "ack:1", "ack:2"]);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+});
+
+test("summary: the window starts at its first event, not at the start of the watch", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  h.clock = 50000;
+  const { done: p } = await summaryRun(h, [ev(1)]);
+  await tickAt(h, 75000);
+  assert.strictEqual(h.out.length, 1);
+  await tickAt(h, 80000);
+  assert.match(h.out[1], /^SUMMARY 1 event \| pr_merged a\/b#1/);
+  h.ac.abort();
+  await p;
+});
+
+test("summary: the backlog counted at start is one summary as soon as it is read", async () => {
+  const h = harness({ pending: 2, window: 30 });
+  const { done: p } = await summaryRun(h, [ev(1), ev(2), ev(3)]);
+  assert.strictEqual(h.out[1], "SUMMARY 2 events | pr_merged a/b#1 delivery=D1 | pr_merged a/b#2 delivery=D2");
+  assert.strictEqual(h.out.length, 2); // event 3 waits for its own window
+  await tickAt(h, 30000);
+  assert.strictEqual(h.out[2], "SUMMARY 1 event | pr_merged a/b#3 delivery=D3");
+  h.ac.abort();
+  await p;
+});
+
+test("summary: a watch that ends with a window open prints and acks nothing of it", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  const { done: p } = await summaryRun(h, [ev(1)]);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+  assert.strictEqual(h.out.length, 1);
+  assert.ok(!h.calls.some((c) => c.startsWith("ack")));
+});
+
+test("summary: a failing summary write exits 3 and acks nothing", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  const write = h.deps.write;
+  h.deps.write = async (l) => { if (l.startsWith("SUMMARY")) throw new Error("EPIPE"); return write(l); };
+  const { done: p } = await summaryRun(h, [ev(1)]);
+  await tickAt(h, 30000);
+  assert.strictEqual(await p, 3);
+  assert.ok(!h.calls.some((c) => c.startsWith("ack")));
 });

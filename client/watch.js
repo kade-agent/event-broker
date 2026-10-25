@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 // The dispatcher's PR watch (agent-config docs/event-broker-design.md, section 9; pr-watch.md there):
-//   node client/watch.js --owner <org> [--profile dispatcher] [--json]
-// Run it as a Claude Code Monitor command. Each stdout line is one event, WATCH-ARMED, WATCH-ALIVE or
-// BROKER-DOWN. The logic is in watch-core.js; this file only wires the real NATS connection.
+//   node client/watch.js --owner <org> [--profile dispatcher] [--json] [--window 30]
+// Run it as a Claude Code Monitor command. Each stdout line is a SUMMARY of a 30 s window (one event
+// with --window 0), WATCH-ARMED, WATCH-ALIVE or BROKER-DOWN. The logic is in watch-core.js; this file only wires the real NATS connection.
 const fs = require("node:fs");
 const os = require("node:os");
 const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");

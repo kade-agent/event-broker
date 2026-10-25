@@ -49,8 +49,9 @@ const message = (repo, signal, extra) => ({
 const publish = (nc, repo, m) => jetstream(nc).publish(`ev.${A}.${repo}.pr.1.${m.signal}`, JSON.stringify(m), { msgID: m.delivery });
 
 // Spawns the client with the reader seed in the environment only (it writes its own key file).
+// --window 0: one line per event, which these checks read; the summary has unit tests.
 function watch(url, profile, dir) {
-  const child = spawn(process.execPath, [WATCH, "--owner", A, "--profile", profile], {
+  const child = spawn(process.execPath, [WATCH, "--owner", A, "--profile", profile, "--window", "0"], {
     env: { PATH: env.PATH, HOME: dir, EVENT_BROKER_URL: url, EVENT_BROKER_CLOUD_SEED: env.READER_SEED_A,
       EVENT_BROKER_NKEY_FILE: path.join(dir, "reader.nk"), WATCH_PIDFILE: path.join(dir, "watch.pid") },
     stdio: ["ignore", "pipe", "pipe"],
