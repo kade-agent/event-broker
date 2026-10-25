@@ -2,7 +2,7 @@
 // client/watch-core.js with every effect injected: no network, no real files, no real clock.
 const test = require("node:test");
 const assert = require("node:assert");
-const { resolveSettings, parseArgs, parseEnvFile, formatLine, Fatal } = require("../client/watch-core");
+const { resolveSettings, parseArgs, parseEnvFile, formatLine, run, Fatal } = require("../client/watch-core");
 
 const HOME = "/home/u";
 const BROKER_ENV = `${HOME}/.claude/dispatcher/broker.env`;
@@ -173,4 +173,243 @@ test("line: --json prints the parseable v2 object on one line", () => {
   assert.ok(!line.includes("\n"));
   assert.deepStrictEqual(JSON.parse(line), m);
   assert.strictEqual(JSON.parse(line).v, 2);
+});
+
+// ---- the loop, with a fake connection, writer, clock and parent check ----
+
+const ev = (seq, over = {}) => ({ seq, data: msg({ signal: "pr_merged", repo: "a/b", pr: seq, delivery: `D${seq}`, ...over }), ack: null });
+
+// queue items: a message, null (a quiet minute) or an Error (a failed pull). When it runs dry the
+// harness aborts the run, and the pull never resolves (the real one would block for a minute).
+function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owner = "kade-agent", writeFails = false, connectFails = 0, pidText = "4242\n" } = {}) {
+  const h = { out: [], calls: [], clock: 0, ticks: [], queue: [...queue], connects: 0, nexts: 0, sleeps: [] };
+  const ac = new AbortController();
+  const fs = fakeFs({ "/p/watch.pid": pidText });
+  h.fs = fs;
+  h.ac = ac;
+  const conn = {
+    streamSubjects: async () => subjects,
+    pending: async () => pending,
+    next: async () => {
+      h.nexts++;
+      if (h.queue.length === 0) { ac.abort(); return new Promise(() => {}); }
+      const item = h.queue.shift();
+      if (item instanceof Error) throw item;
+      return item;
+    },
+    close: async () => { h.calls.push("close"); },
+  };
+  h.conn = conn;
+  h.deps = {
+    settings: { owner, profile: "dispatcher", json: false, pidFile: "/p/watch.pid" },
+    connect: async (hooks) => {
+      h.hooks = hooks;
+      if (h.connects++ < connectFails) throw new Error("connect refused");
+      return conn;
+    },
+    write: async (line) => { h.calls.push(`write:${line.split(" ")[0]}`); if (writeFails) throw new Error("EPIPE"); h.out.push(line); },
+    now: () => h.clock,
+    sleep: async (ms) => { h.sleeps.push(ms); },
+    every: (ms, fn) => { h.ticks.push({ ms, fn }); return () => {}; },
+    checkParent: () => {},
+    fs, pid: 4242, signal: ac.signal,
+  };
+  const wrap = (m) => m && !(m instanceof Error) && { ...m, ack: async () => { h.calls.push(`ack:${m.seq}`); } };
+  h.queue = h.queue.map((m) => (m instanceof Error || m === null ? m : wrap(m)));
+  return h;
+}
+
+test("loop: the first line is WATCH-ARMED with the unprocessed count; the pid is written first", async () => {
+  const h = harness({ pending: 3 });
+  assert.strictEqual(await run(h.deps), 0);
+  assert.strictEqual(h.out[0], "WATCH-ARMED kade-agent consumer=dispatcher unprocessed=3");
+  assert.strictEqual(h.fs.files["/p/watch.pid"], "4242\n");
+});
+
+test("loop: stream subjects of another account -> BROKER-DOWN, exit 1, no pull", async () => {
+  const h = harness({ subjects: ["ev.stella-rain.>"] });
+  assert.strictEqual(await run(h.deps), 1);
+  assert.deepStrictEqual(h.out, ["BROKER-DOWN key is for another account (want kade-agent)"]);
+  assert.strictEqual(h.nexts, 0);
+});
+
+test("loop: a stream with more than the one subject is another account too", async () => {
+  const h = harness({ subjects: ["ev.kade-agent.>", "ev.stella-rain.>"] });
+  assert.strictEqual(await run(h.deps), 1);
+  assert.match(h.out[0], /^BROKER-DOWN key is for another account/);
+});
+
+test("loop: the line is written before the message is acked", async () => {
+  const h = harness({ queue: [ev(1)] });
+  await run(h.deps);
+  assert.deepStrictEqual(h.calls.filter((c) => c !== "close"), ["write:WATCH-ARMED", "write:pr_merged", "ack:1"]);
+  assert.strictEqual(h.out[1], "pr_merged a/b#1 delivery=D1");
+});
+
+test("loop: --json prints the object", async () => {
+  const h = harness({ queue: [ev(1)] });
+  h.deps.settings.json = true;
+  await run(h.deps);
+  assert.strictEqual(JSON.parse(h.out[1]).signal, "pr_merged");
+});
+
+test("loop: a failing write is not acked and exits 3", async () => {
+  const h = harness({ queue: [ev(1)], writeFails: true });
+  assert.strictEqual(await run(h.deps), 3);
+  assert.ok(!h.calls.some((c) => c.startsWith("ack")));
+});
+
+test("loop: a failing write of a message line after ARMED exits 3 without acking", async () => {
+  const h = harness({ queue: [ev(1)] });
+  let n = 0;
+  const write = h.deps.write;
+  h.deps.write = async (l) => { if (++n === 2) throw new Error("EPIPE"); return write(l); };
+  assert.strictEqual(await run(h.deps), 3);
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")), []);
+});
+
+test("loop: the same stream sequence twice is one line and two acks", async () => {
+  const h = harness({ queue: [ev(7), ev(7)] });
+  await run(h.deps);
+  assert.strictEqual(h.out.length, 2); // ARMED and one line
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")), ["ack:7", "ack:7"]);
+});
+
+test("loop: only the last 1000 sequences are remembered", async () => {
+  const queue = [];
+  for (let i = 1; i <= 1001; i++) queue.push(ev(i));
+  queue.push(ev(1));
+  const h = harness({ queue });
+  await run(h.deps);
+  assert.strictEqual(h.out.length, 1 + 1001 + 1); // sequence 1 fell out of the window
+});
+
+test("loop: a message that is not JSON is acked and dropped", async () => {
+  const h = harness({ queue: [{ seq: 1, data: null }] });
+  await run(h.deps);
+  assert.strictEqual(h.out.length, 1);
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")), ["ack:1"]);
+});
+
+const tickAt = async (h, ms) => { h.clock = ms; for (const t of h.ticks) await t.fn(); };
+// A run that stays open: the pull blocks, and the test drives the ticks itself.
+async function open(h) {
+  h.queue = [];
+  h.conn.next = async () => { h.nexts++; return new Promise(() => {}); };
+  const p = run(h.deps);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  return p;
+}
+
+test("alive: 600 s without a line prints WATCH-ALIVE from a fresh consumer info; 300 s prints nothing", async () => {
+  const h = harness({ pending: 5 });
+  const p = open(h);
+  await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.strictEqual(h.ticks[0].ms, 5000);
+  h.conn.pending = async () => 9;
+  await tickAt(h, 300000);
+  assert.strictEqual(h.out.length, 1);
+  await tickAt(h, 600000);
+  assert.strictEqual(h.out.length, 2);
+  assert.strictEqual(h.out[1], "WATCH-ALIVE kade-agent consumer=dispatcher unprocessed=9");
+  await tickAt(h, 660000); // the alive line counts as a line printed
+  assert.strictEqual(h.out.length, 2);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+});
+
+test("alive: two failed consumer infos in a row -> BROKER-DOWN, exit 1", async () => {
+  const h = harness();
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  h.conn.pending = async () => { throw new Error("info failed"); };
+  await tickAt(h, 600000);
+  assert.strictEqual(h.out.length, 1);
+  await tickAt(h, 605000);
+  assert.strictEqual(await p, 1);
+  assert.strictEqual(h.out.at(-1), "BROKER-DOWN info failed");
+});
+
+test("down: two failing pulls in a row -> BROKER-DOWN, exit 1", async () => {
+  const h = harness({ queue: [new Error("pull failed"), new Error("pull failed")] });
+  assert.strictEqual(await run(h.deps), 1);
+  assert.strictEqual(h.out.at(-1), "BROKER-DOWN pull failed");
+});
+
+test("down: one failing pull then a message -> the line, no BROKER-DOWN", async () => {
+  const h = harness({ queue: [new Error("pull failed"), ev(2), new Error("again")] });
+  assert.strictEqual(await run(h.deps), 0);
+  assert.ok(h.out.some((l) => l.startsWith("pr_merged ")));
+  assert.ok(!h.out.some((l) => l.startsWith("BROKER-DOWN")));
+});
+
+test("down: a quiet minute (null) resets the failure count", async () => {
+  const h = harness({ queue: [new Error("e"), null, new Error("e")] });
+  assert.strictEqual(await run(h.deps), 0);
+  assert.ok(!h.out.some((l) => l.startsWith("BROKER-DOWN")));
+});
+
+test("down: two failed connects 5 s apart -> BROKER-DOWN, exit 1; one failed connect still arms", async () => {
+  const h = harness({ connectFails: 2 });
+  assert.strictEqual(await run(h.deps), 1);
+  assert.deepStrictEqual(h.out, ["BROKER-DOWN connect refused"]);
+  assert.deepStrictEqual(h.sleeps, [5000]);
+  const ok = harness({ connectFails: 1 });
+  assert.strictEqual(await run(ok.deps), 0);
+  assert.match(ok.out[0], /^WATCH-ARMED/);
+});
+
+test("down: a disconnect lasting over 120 s -> BROKER-DOWN, exit 1; a reconnect clears it", async () => {
+  const h = harness();
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  h.clock = 1000;
+  h.hooks.disconnected();
+  await tickAt(h, 100000);
+  assert.strictEqual(h.out.length, 1);
+  h.hooks.reconnected();
+  await tickAt(h, 200000);
+  assert.strictEqual(h.out.length, 1);
+  h.clock = 210000;
+  h.hooks.disconnected();
+  await tickAt(h, 331000);
+  assert.strictEqual(await p, 1);
+  assert.match(h.out.at(-1), /^BROKER-DOWN .*120 s/);
+});
+
+test("ending: the pidfile holding another pid -> exit 0, nothing more printed, no pull", async () => {
+  const h = harness({ queue: [ev(1)] });
+  // A newer watch takes the pidfile: our own write is lost and the file holds its pid.
+  h.fs.writeFileSync = () => {};
+  h.fs.readFileSync = () => "9999\n";
+  assert.strictEqual(await run(h.deps), 0);
+  assert.strictEqual(h.nexts, 0);
+  assert.deepStrictEqual(h.out, []);
+});
+
+test("ending: the parent check throwing -> exit 0, no line", async () => {
+  const h = harness();
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  h.deps.checkParent = () => { throw new Error("ESRCH"); };
+  await tickAt(h, 5000);
+  assert.strictEqual(await p, 0);
+  assert.strictEqual(h.out.length, 1);
+  assert.ok(h.calls.includes("close"));
+});
+
+test("ending: a signal closes the connection and exits 0; a blocked pull does not hold it", async () => {
+  const h = harness();
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+  assert.ok(h.calls.includes("close"));
+});
+
+test("the seed never appears in the output of a failed run", async () => {
+  const h = harness({ connectFails: 2 });
+  await run(h.deps);
+  assert.ok(!h.out.join("\n").includes("SUA"));
 });
