@@ -102,4 +102,135 @@ function formatLine(m, json) {
   return parts.join(" ");
 }
 
-module.exports = { Fatal, parseArgs, parseEnvFile, resolveSettings, formatLine };
+const SEEN_MAX = 1000; // stream sequences remembered, to ack a redelivery without printing it again
+const ALIVE_MS = 600000; // no line printed for this long -> WATCH-ALIVE
+const DOWN_MS = 120000; // disconnected for longer than this -> BROKER-DOWN
+const TICK_MS = 5000; // parent, disconnect and heartbeat checks
+const CONNECT_RETRY_MS = 5000;
+const PULL_RETRY_MS = 1000;
+
+// The watch. Resolves to the exit code: 0 a quiet end, 1 BROKER-DOWN, 2 settings, 3 a failed write.
+// deps: settings {owner, profile, json, pidFile}; connect(hooks) -> conn {streamSubjects(), pending(),
+// next() -> {seq, data, ack()} | null, close()}, with hooks {disconnected(), reconnected()};
+// write(line) (rejects on failure); now(); sleep(ms); every(ms, fn) -> cancel; checkParent() (throws
+// when the parent is gone); fs; pid; signal (an AbortSignal: SIGINT, SIGTERM, SIGHUP).
+async function run(d) {
+  const { owner, profile, json, pidFile } = d.settings;
+  let ended = false;
+  let code = 0;
+  let conn = null;
+  let armed = false;
+  let lastLine = 0;
+  let disconnectedAt = null;
+  let infoFails = 0;
+  let aliveBusy = false;
+  let finish;
+  const done = new Promise((resolve) => { finish = resolve; });
+  const seen = new Set();
+
+  // Stops everything; the optional line (BROKER-DOWN) is written before the run resolves.
+  const end = (exitCode, line) => {
+    if (ended) return;
+    ended = true;
+    code = exitCode;
+    (async () => {
+      if (line) await d.write(line).catch(() => {});
+      finish(code);
+    })();
+  };
+  // A line printed: false when stdout failed (the run ends with 3, and nothing is acked).
+  const emit = async (line) => {
+    if (ended) return false;
+    try { await d.write(line); } catch { end(3); return false; }
+    lastLine = d.now();
+    return true;
+  };
+  const down = (e) => end(1, `BROKER-DOWN ${e && e.message ? e.message : e}`);
+  const superseded = () => {
+    try {
+      const text = d.fs.readFileSync(pidFile, "utf8").trim();
+      return text !== "" && text !== String(d.pid);
+    } catch { return false; }
+  };
+  const ack = async (m) => { try { await m.ack(); } catch { /* it comes back after the ack wait */ } };
+
+  const hooks = {
+    disconnected: () => { if (disconnectedAt == null) disconnectedAt = d.now(); },
+    reconnected: () => { disconnectedAt = null; },
+  };
+  const status = (n) => `${owner} consumer=${profile} unprocessed=${n}`;
+
+  async function tick() {
+    if (ended) return;
+    try { d.checkParent(); } catch { end(0); return; }
+    if (disconnectedAt != null && d.now() - disconnectedAt > DOWN_MS) { down(new Error("disconnected for over 120 s")); return; }
+    if (!armed || aliveBusy || d.now() - lastLine < ALIVE_MS) return;
+    aliveBusy = true;
+    try {
+      const n = await conn.pending();
+      infoFails = 0;
+      await emit(`WATCH-ALIVE ${status(n)}`);
+    } catch (e) {
+      if (++infoFails >= 2) down(e);
+    } finally { aliveBusy = false; }
+  }
+
+  async function connectTwice() {
+    for (let attempt = 1; ; attempt++) {
+      try { return await d.connect(hooks); } catch (e) {
+        if (attempt >= 2) { down(e); return null; }
+        await d.sleep(CONNECT_RETRY_MS);
+      }
+    }
+  }
+
+  async function main() {
+    try {
+      d.fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+      d.fs.writeFileSync(pidFile, `${d.pid}\n`);
+    } catch (e) { end(2, `BROKER-DOWN cannot write the pidfile ${pidFile} (${e.code || "error"})`); return; }
+    if (superseded()) { end(0); return; }
+
+    conn = await connectTwice();
+    if (!conn) return;
+    if (ended) return;
+
+    const subjects = await conn.streamSubjects();
+    if (subjects.length !== 1 || subjects[0] !== `ev.${owner}.>`) { end(1, `BROKER-DOWN key is for another account (want ${owner})`); return; }
+    const pending = await conn.pending();
+    if (superseded()) { end(0); return; }
+    if (!(await emit(`WATCH-ARMED ${status(pending)}`))) return;
+    armed = true;
+
+    let fails = 0;
+    while (!ended) {
+      if (superseded()) { end(0); return; }
+      let m;
+      try { m = await conn.next(); fails = 0; } catch (e) {
+        if (ended) return;
+        if (++fails >= 2) { down(e); return; }
+        await d.sleep(PULL_RETRY_MS);
+        continue;
+      }
+      if (!m || ended) continue;
+      if (seen.has(m.seq)) { await ack(m); continue; }
+      // Anything without a signal and a repo cannot be a line: drop it, or it would come back forever.
+      if (m.data && m.data.signal && m.data.repo && !(await emit(formatLine(m.data, json)))) return;
+      seen.add(m.seq);
+      if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value);
+      await ack(m);
+    }
+  }
+
+  const stopTick = d.every(TICK_MS, tick);
+  if (d.signal.aborted) end(0);
+  else d.signal.addEventListener("abort", () => end(0), { once: true });
+  main().catch((e) => down(e));
+
+  await done;
+  stopTick();
+  if (conn) await conn.close().catch(() => {});
+  return code;
+}
+
+module.exports = { Fatal, parseArgs, parseEnvFile, resolveSettings, formatLine, run };
