@@ -100,3 +100,26 @@ test("an issue goes to the issue scope", () => {
   assert.strictEqual(v2Of(ev({ event: "issues", action: "labeled", issue: 4, label: "x" }), "main").subject,
     "ev.stella-rain.app.issue.4.issue_labeled");
 });
+
+test("every delivery normalize keeps gets a signal from SIGNALS", () => {
+  const { normalize } = require("../src/normalize");
+  const repository = { full_name: "o/r", default_branch: "main" };
+  const pr = { number: 1, merged: false, draft: false, auto_merge: null, head: { ref: "b", sha: "s" } };
+  const issue = { number: 2, state_reason: null };
+  const kept = [
+    ...["closed", "ready_for_review", "converted_to_draft", "auto_merge_enabled", "auto_merge_disabled"]
+      .map((action) => ["pull_request", { action, pull_request: pr }]),
+    ...["closed", "reopened"].map((action) => ["issues", { action, issue }]),
+    ["issues", { action: "labeled", issue, label: { name: "x" } }],
+    ["check_run", { action: "completed", check_run: { name: "t", conclusion: "success", pull_requests: [] } }],
+    ["check_suite", { action: "completed", check_suite: { conclusion: "success", head_branch: "b", pull_requests: [] } }],
+    ["workflow_run", { action: "completed", workflow_run: { name: "w", conclusion: "success", head_branch: "b", pull_requests: [] } }],
+    ["pull_request_review", { action: "submitted", pull_request: pr, review: { state: "approved" } }],
+    ["issue_comment", { action: "created", issue, comment: { id: 1, user: null, html_url: "u" } }],
+    ["push", { ref: "refs/heads/main", after: "a" }],
+  ];
+  for (const [name, payload] of kept) {
+    const r = normalize(name, { ...payload, repository }, "d");
+    assert.ok(SIGNALS.includes(r.v2.event.signal), `${name} ${payload.action}`);
+  }
+});
