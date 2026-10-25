@@ -200,8 +200,10 @@ test("nats-server.conf: each receiver may write state.<owner>.> and use the STAT
   const owners = [...conf.matchAll(/^  "([a-z0-9-]+)": \{$/gm)].map((x) => x[1]);
   assert.deepStrictEqual(owners, ["kade-k8s-platform", "kade-agent", "stella-rain", "star-resonance"]);
   for (const o of owners) assert.ok(conf.includes(`"state.${o}.>"`), `receiver ${o} writes state.${o}.>`);
+  const receivers = conf.split("nkey: $RECEIVER_NKEY_").slice(1).map((b) => b.split("nkey: $READER_NKEY_")[0]);
+  assert.strictEqual(receivers.length, 4);
   for (const api of ["INFO", "CREATE", "UPDATE", "MSG.GET"]) {
-    assert.strictEqual(conf.split(`"$JS.API.STREAM.${api}.STATE"`).length - 1, 4, `four receivers have STREAM.${api}.STATE`);
+    for (const r of receivers) assert.ok(r.includes(`"$JS.API.STREAM.${api}.STATE"`), `each receiver has STREAM.${api}.STATE`);
   }
   for (const block of conf.split("nkey: $READER_NKEY_").slice(1)) {
     const reader = block.split("nkey: $RECEIVER_NKEY_")[0];

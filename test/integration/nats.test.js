@@ -110,7 +110,7 @@ test("a receiver key is refused on websocket", { skip }, async () => {
 });
 
 // Decision 19 (S1): the receiver keeps its state in STATE, one message per subject; the reader gets nothing of it.
-test("receiver A writes and reads back its state through STATE; a second write replaces the first; reader A cannot read it", { skip }, async () => {
+test("receiver A writes and reads back its state through STATE; a second write replaces the first; reader A reads it but cannot write", { skip }, async () => {
   const { stateKey } = require("../../src/stream");
   const key = stateKey(`${A}/r`, "main", "Rust");
   const nc = await lan(env.RECEIVER_SEED_A);
@@ -125,6 +125,8 @@ test("receiver A writes and reads back its state through STATE; a second write r
   } finally { await nc.close(); }
   const reader = await lan(env.READER_SEED_A);
   try {
-    await assert.rejects((await jetstreamManager(reader, { checkAPI: false })).streams.getMessage("STATE", { last_by_subj: key }));
+    // Decision 21 (S3): the reader reads STATE for watch.js --state, and cannot write it.
+    assert.deepStrictEqual((await (await jetstreamManager(reader)).streams.getMessage("STATE", { last_by_subj: key })).json(), { passed: true });
+    await assert.rejects(jetstream(reader).publish(key, JSON.stringify({ passed: false }), { timeout: 1500 }));
   } finally { await reader.close(); }
 });

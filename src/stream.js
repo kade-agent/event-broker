@@ -98,6 +98,56 @@ function createStateStore({ read = async () => null, write = async () => {}, log
   };
 }
 
+// Decision 21 (S3): one snapshot per PR, state.<owner>.<repo>.pr.<n>, updated by every v2 event on
+// that PR. Each event sets what it knows; a new sha empties checks, so they are the head's.
+const EMPTY_SNAPSHOT = { branch: null, sha: null, state: "open", draft: null, auto_merge: null,
+  mergeable_state: null, checks: {}, review: null, last_comment: null, updated_at: null };
+
+function nextSnapshot(prev, e, at) {
+  const s = prev ? { ...prev, checks: { ...(prev.checks || {}) } } : { repo: e.repo, pr: e.pr, ...EMPTY_SNAPSHOT, checks: {} };
+  if (e.branch) s.branch = e.branch;
+  if (e.sha && e.sha !== s.sha) { s.sha = e.sha; s.checks = {}; }
+  if (e.event === "pull_request") s.state = e.signal === "pr_merged" ? "merged" : e.signal === "pr_closed" ? "closed" : "open";
+  if (e.event === "pull_request" || e.event === "mergeable") {
+    if (e.draft != null) s.draft = e.draft;
+    if (e.auto_merge != null) s.auto_merge = e.auto_merge;
+  }
+  if (e.mergeable_state) s.mergeable_state = e.mergeable_state;
+  if (["workflow_run", "check_run", "check_suite"].includes(e.event) && e.check && e.check.name) s.checks[e.check.name] = e.conclusion;
+  if (e.event === "pull_request_review" && e.conclusion) s.review = String(e.conclusion).toLowerCase();
+  if (e.event === "issue_comment" && e.comment) s.last_comment = { author: e.comment.author, url: e.comment.url };
+  s.updated_at = at;
+  return s;
+}
+
+// update(v2 event) runs one update per PR at a time, so two events on one PR both land.
+function createPrSnapshots({ store = createStateStore(), now = () => new Date().toISOString() } = {}) {
+  const queues = new Map();
+  return {
+    update(e) {
+      if (e.pr == null) return Promise.resolve();
+      const key = stateKey(e.repo, "pr", e.pr);
+      const next = (queues.get(key) || Promise.resolve()).then(async () => {
+        await store.put(key, nextSnapshot(await store.get(key), e, now()));
+      });
+      queues.set(key, next.catch(() => {}));
+      return next;
+    },
+  };
+}
+
+// A publish that, after a v2 (ev.*) event on a PR is published, updates that PR's snapshot. A failed
+// publish updates nothing and still rejects; a failed snapshot is logged and the publish stands.
+function withSnapshots(publish, snapshots, log = console.error) {
+  return async (subject, event, msgID) => {
+    const ack = await publish(subject, event, msgID);
+    if (subject.startsWith("ev.") && event && event.pr != null) {
+      try { await snapshots.update(event); } catch (e) { log(`snapshot ${subject}: ${e.message}`); }
+    }
+    return ack;
+  };
+}
+
 const notFound = (e) => /not found/i.test(e && e.message);
 const exists = (p) => p.then(() => true, (e) => { if (notFound(e)) return false; throw e; });
 
@@ -127,4 +177,5 @@ async function ensureStream(jsm, owner, log = console.error) {
   } catch (e) { log(`${events.name}: consumer list failed: ${e.message}`); }
 }
 
-module.exports = { ensureStream, streamFor, consumerFor, eventsStreamFor, profileConsumerFor, stateStreamFor, stateKey, createStateStore };
+module.exports = { ensureStream, streamFor, consumerFor, eventsStreamFor, profileConsumerFor, stateStreamFor, stateKey, createStateStore,
+  createPrSnapshots, withSnapshots };

@@ -2,6 +2,7 @@
 "use strict";
 // The dispatcher's PR watch (agent-config docs/event-broker-design.md, section 9; pr-watch.md there):
 //   node client/watch.js --owner <org> [--profile dispatcher] [--json] [--window 30]
+//   node client/watch.js --owner <org> --state <org>/<repo> [--json]   (prints STATE and exits; decision 21)
 // Run it as a Claude Code Monitor command. Each stdout line is a SUMMARY of a 30 s window (one event
 // with --window 0), WATCH-ARMED, WATCH-ALIVE or BROKER-DOWN. The logic is in watch-core.js; this file only wires the real NATS connection.
 const fs = require("node:fs");
@@ -9,7 +10,8 @@ const os = require("node:os");
 const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");
 const { wsconnect } = require("@nats-io/nats-core");
 const { jetstream, jetstreamManager } = require("@nats-io/jetstream");
-const { Fatal, resolveSettings, run } = require("./watch-core");
+const { Fatal, resolveSettings, run, formatState } = require("./watch-core");
+const { token } = require("../src/normalize");
 
 const PULL_MS = 60000;
 
@@ -34,6 +36,20 @@ function adapter(nc, owner, profile) {
   };
 }
 
+// Decision 21 (S3): the repository's red list and PR snapshots from STATE, read with the reader key.
+async function readState(nc, owner, repo) {
+  const prefix = `state.${owner}.${token(repo.split("/")[1])}`;
+  const jsm = await jetstreamManager(nc);
+  const get = async (subject) => {
+    const m = await jsm.streams.getMessage("STATE", { last_by_subj: subject });
+    return m ? m.json() : null;
+  };
+  const red = ((await get(`${prefix}.red`)) || { red: [] }).red;
+  const info = await jsm.streams.info("STATE", { subjects_filter: `${prefix}.pr.*` });
+  const prs = (await Promise.all(Object.keys((info.state && info.state.subjects) || {}).map(get))).filter(Boolean);
+  return { repo, red, prs };
+}
+
 async function main() {
   let settings;
   try {
@@ -41,6 +57,20 @@ async function main() {
   } catch (e) {
     console.log(`BROKER-DOWN ${e instanceof Fatal ? e.message : `settings: ${e.message}`}`);
     return e instanceof Fatal ? e.exitCode : 2;
+  }
+
+  const seedText = () => new TextEncoder().encode(fs.readFileSync(settings.keyFile, "utf8").trim());
+  if (settings.state) {
+    let nc;
+    try {
+      const opts = { servers: settings.url, authenticator: nkeyAuthenticator(seedText()), timeout: 5000 };
+      nc = /^wss?:/.test(settings.url) ? await wsconnect(opts) : await connect(opts);
+      for (const line of formatState(await readState(nc, settings.owner, settings.state), settings.json)) console.log(line);
+      return 0;
+    } catch (e) {
+      console.log(`BROKER-DOWN ${e.message}`);
+      return 1;
+    } finally { if (nc) await nc.close().catch(() => {}); }
   }
 
   const parent = process.ppid;
