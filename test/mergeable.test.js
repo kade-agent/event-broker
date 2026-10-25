@@ -23,10 +23,11 @@ function fakeGh(states, open = Object.keys(states).map(Number), base = "main") {
 }
 
 function watch(gh, opts = {}) {
-  const published = [];
-  const w = createMergeWatch({ gh, publish: async (subject, event, msgId) => published.push({ subject, event, msgId }),
-    sleep: async () => {}, maxTries: 4, ...opts });
-  return { w, published };
+  const published = []; // the v1 messages
+  const all = []; // v1 and v2, in order
+  const record = async (subject, event, msgId) => { all.push({ subject, event, msgId }); if (subject.startsWith("github.")) published.push({ subject, event, msgId }); };
+  const w = createMergeWatch({ gh, publish: record, sleep: async () => {}, maxTries: 4, ...opts });
+  return { w, published, all };
 }
 
 test("a PR's state is read past 'unknown' and published once", async () => {
@@ -40,6 +41,19 @@ test("a PR's state is read past 'unknown' and published once", async () => {
   assert.strictEqual(event.branch, "claude/t5");
   assert.strictEqual(event.sha, "sha5");
   assert.strictEqual(msgId, "mergeable:stella-rain/app#5:sha5:dirty");
+});
+
+test("a change publishes v1 then v2; the v2 event carries the message id as its delivery", async () => {
+  const { w, all: published } = watch(fakeGh({ 5: ["dirty"] }));
+  await w.handle({ repo: "stella-rain/app", pr: 5 });
+  const id = "mergeable:stella-rain/app#5:sha5:dirty";
+  assert.deepStrictEqual(published.map((p) => [p.subject, p.msgId]), [
+    ["github.stella-rain.app.pr.5.mergeable", id],
+    ["ev.stella-rain.app.pr.5.merge_dirty", id],
+  ]);
+  assert.strictEqual(published[1].event.v, 2);
+  assert.strictEqual(published[1].event.signal, "merge_dirty");
+  assert.strictEqual(published[1].event.delivery, id);
 });
 
 test("an unchanged state is not published again; a change is", async () => {
@@ -92,7 +106,7 @@ test("a publish logs one line with the message id; an unchanged state logs nothi
   const logs = [];
   const { w } = watch(fakeGh({ 5: ["unknown", "dirty"] }), { log: (l) => logs.push(l) });
   await w.handle({ repo: "stella-rain/app", pr: 5 });
-  assert.deepStrictEqual(logs, ["mergeable:stella-rain/app#5:sha5:dirty mergeable.dirty -> published github.stella-rain.app.pr.5.mergeable"]);
+  assert.deepStrictEqual(logs, ["mergeable:stella-rain/app#5:sha5:dirty mergeable.dirty -> published github.stella-rain.app.pr.5.mergeable ev.stella-rain.app.pr.5.merge_dirty"]);
   await w.handle({ repo: "stella-rain/app", pr: 5 });
   assert.strictEqual(logs.length, 1);
 });
@@ -101,5 +115,5 @@ test("a duplicate PubAck logs a duplicate line", async () => {
   const logs = [];
   const { w } = watch(fakeGh({ 5: ["dirty"] }), { log: (l) => logs.push(l), publish: async () => ({ duplicate: true }) });
   await w.handle({ repo: "stella-rain/app", pr: 5 });
-  assert.deepStrictEqual(logs, ["mergeable:stella-rain/app#5:sha5:dirty mergeable.dirty -> duplicate github.stella-rain.app.pr.5.mergeable"]);
+  assert.deepStrictEqual(logs, ["mergeable:stella-rain/app#5:sha5:dirty mergeable.dirty -> duplicate github.stella-rain.app.pr.5.mergeable ev.stella-rain.app.pr.5.merge_dirty"]);
 });
