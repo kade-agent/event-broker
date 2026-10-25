@@ -25,6 +25,9 @@ const prFields = (pr) => ({
   pr: pr.number, branch: pr.head.ref, sha: pr.head.sha, draft: pr.draft === true, auto_merge: pr.auto_merge != null,
 });
 
+// Agents' branches (global rules: claude/<task>, agent/<task>): their pushes are a task's progress.
+const TASK_BRANCH = /^(claude|agent)\//;
+
 const PR_ACTIONS = new Set(["closed", "ready_for_review", "converted_to_draft", "auto_merge_enabled", "auto_merge_disabled"]);
 
 const HANDLERS = {
@@ -69,8 +72,9 @@ const HANDLERS = {
     return { ...ids, action: p.action, comment: { id: c.id, author: c.user ? c.user.login : null, url: c.html_url } };
   },
   push(p) {
-    const branch = p.repository.default_branch;
-    if (p.ref !== `refs/heads/${branch}`) return null;
+    if (typeof p.ref !== "string" || !p.ref.startsWith("refs/heads/")) return null;
+    const branch = p.ref.slice("refs/heads/".length);
+    if (branch !== p.repository.default_branch && (!TASK_BRANCH.test(branch) || p.deleted)) return null;
     return { branch, sha: p.after };
   },
 };
@@ -91,7 +95,9 @@ function normalize(event, payload, delivery) {
   const e = { ...blank(delivery, payload.repository.full_name), ...fields, event };
   // signals.js needs token() from here, so it is loaded on first use.
   const { v2Of } = require("./signals");
-  return { subject: subjectOf(e), event: e, v2: v2Of(e, payload.repository.default_branch) };
+  // A task branch push is v2 only (design decision 18): v1 has no subject for it.
+  const v1Subject = e.event === "push" && e.branch !== payload.repository.default_branch ? null : subjectOf(e);
+  return { subject: v1Subject, event: e, v2: v2Of(e, payload.repository.default_branch) };
 }
 
 function mergeTrigger(event, payload) {

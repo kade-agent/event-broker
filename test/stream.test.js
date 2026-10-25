@@ -124,10 +124,11 @@ test("EVENTS: ev.<owner>.> on file storage, 7 days, 24 MiB, discard old, 120 s d
   assert.strictEqual(s.duplicate_window, 120e9);
 });
 
-test("profile consumers: dispatcher filters 17 signals, all filters ev.<owner>.>", () => {
+test("profile consumers: dispatcher filters 18 signals, all filters ev.<owner>.>", () => {
   const d = profileConsumerFor("kade-agent", "dispatcher");
   assert.strictEqual(d.durable_name, "dispatcher");
-  assert.strictEqual(d.filter_subjects.length, 17);
+  assert.strictEqual(d.filter_subjects.length, 18);
+  assert.strictEqual(d.filter_subjects.at(-1), "ev.kade-agent.*.*.*.push_branch");
   assert.strictEqual(d.filter_subjects[0], "ev.kade-agent.*.*.*.pr_merged");
   assert.strictEqual(d.ack_policy, "explicit");
   assert.strictEqual(d.deliver_policy, "new");
