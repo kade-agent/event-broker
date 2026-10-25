@@ -79,4 +79,27 @@ function resolveSettings({ argv, env, home, fs, platform }) {
   };
 }
 
-module.exports = { Fatal, parseArgs, parseEnvFile, resolveSettings };
+// One compact line per event: `<signal> <repo>#<n>` (`<repo>@<branch>` when there is no PR or issue),
+// then key=value for each non-null field. A value holding a space, a quote or `=` is a JSON string.
+const quote = (v) => (/[\s"=]/.test(v) ? JSON.stringify(v) : v);
+
+function formatLine(m, json) {
+  if (json) return JSON.stringify(m);
+  const n = m.pr ?? m.issue;
+  const parts = [`${m.signal} ${m.repo}${n != null ? `#${n}` : `@${m.branch}`}`];
+  const fields = [
+    ["branch", m.pr != null ? m.branch : null],
+    ["sha", m.sha ? String(m.sha).slice(0, 7) : null],
+    ["check", m.check && m.check.name],
+    ["url", (m.check && m.check.url) || (m.comment && m.comment.url)],
+    ["conclusion", String(m.signal).endsWith("_other") ? m.conclusion : null],
+    ["label", m.label],
+    ["state_reason", m.state_reason],
+    ["author", m.comment && m.comment.author],
+    ["delivery", m.delivery],
+  ];
+  for (const [k, v] of fields) if (v != null && v !== "") parts.push(`${k}=${quote(String(v))}`);
+  return parts.join(" ");
+}
+
+module.exports = { Fatal, parseArgs, parseEnvFile, resolveSettings, formatLine };
