@@ -28,6 +28,13 @@ const prFields = (pr) => ({
 // Agents' branches (global rules: claude/<task>, agent/<task>): their pushes are a task's progress.
 const TASK_BRANCH = /^(claude|agent)\//;
 
+// Decision 23: the one piece of comment text the stream carries, a strict DONE or BLOCKED first line.
+const STRICT_LINE = /^(DONE|BLOCKED) \S+/;
+const strictLine = (body) => {
+  const first = String(body ?? "").split(/\r?\n/, 1)[0].trim();
+  return STRICT_LINE.test(first) ? first.slice(0, 300) : null;
+};
+
 const PR_ACTIONS = new Set(["closed", "ready_for_review", "converted_to_draft", "auto_merge_enabled", "auto_merge_disabled"]);
 
 const HANDLERS = {
@@ -69,7 +76,7 @@ const HANDLERS = {
     const c = p.comment;
     const number = p.issue.number;
     const ids = p.issue.pull_request ? { pr: number } : { issue: number };
-    return { ...ids, action: p.action, comment: { id: c.id, author: c.user ? c.user.login : null, url: c.html_url } };
+    return { ...ids, action: p.action, comment: { id: c.id, author: c.user ? c.user.login : null, url: c.html_url, line: strictLine(c.body) } };
   },
   push(p) {
     if (typeof p.ref !== "string" || !p.ref.startsWith("refs/heads/")) return null;
