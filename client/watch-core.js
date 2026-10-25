@@ -106,6 +106,7 @@ function formatLine(m, json) {
     ["label", m.label],
     ["state_reason", m.state_reason],
     ["author", m.comment && m.comment.author],
+    ["line", m.comment && m.comment.line], // decision 23
     ["delivery", m.delivery],
   ];
   for (const [k, v] of fields) if (v != null && v !== "") parts.push(`${k}=${quote(String(v))}`);
