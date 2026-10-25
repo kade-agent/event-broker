@@ -4,6 +4,7 @@
 // (design section 5). The last states live in memory: after a restart the first check republishes,
 // and JetStream's duplicate window drops a repeat within two minutes.
 const { prefix, blank, prFields } = require("./normalize");
+const { v2Of } = require("./signals");
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -27,9 +28,11 @@ function createMergeWatch({ gh, publish, sleep = wait, maxTries = 6, baseDelayMs
     const event = { ...blank(null, repo), ...prFields(pr), event: "mergeable", mergeable_state: pr.mergeable_state };
     const subject = `${prefix(repo)}.pr.${n}.mergeable`;
     const msgID = `mergeable:${key}:${pr.head.sha}:${pr.mergeable_state}`;
-    const ack = await publish(subject, event, msgID);
+    const v2 = v2Of({ ...event, delivery: msgID });
+    const ack1 = await publish(subject, event, msgID);
+    const ack2 = await publish(v2.subject, v2.event, msgID);
     last.set(key, pr.mergeable_state);
-    log(`${msgID} mergeable.${pr.mergeable_state} -> ${ack && ack.duplicate ? "duplicate" : "published"} ${subject}`);
+    log(`${msgID} mergeable.${pr.mergeable_state} -> ${ack1 && ack1.duplicate && ack2 && ack2.duplicate ? "duplicate" : "published"} ${subject} ${v2.subject}`);
   }
 
   return {

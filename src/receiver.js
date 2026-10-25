@@ -1,7 +1,7 @@
 "use strict";
 // POST /github  an App webhook delivery: signature checked, normalized, published to JetStream with
-//               the delivery GUID as the message id; a push or PR update also starts a
-//               mergeability check.
+//               the delivery GUID as the message id, as v1 (github.*) and v2 (ev.*); a push or
+//               PR update also starts a mergeability check.
 // GET  /healthz liveness for the NAS.
 const http = require("node:http");
 const fs = require("node:fs");
@@ -48,9 +48,13 @@ function createReceiver({ secret, publish, onTrigger, allowedOwners, log = conso
     const trigger = mergeTrigger(event, payload);
     if (!out && !trigger) { log(`${tag} dropped`); return send(res, 204); }
     if (out) {
-      let ack;
-      try { ack = await publish(out.subject, out.event, delivery); } catch (e) { log(`publish ${out.subject}: ${e.message}`); return send(res, 503); }
-      log(`${tag} ${ack && ack.duplicate ? "duplicate" : "published"} ${out.subject}`);
+      // Either publish failing answers 503 and the delivery can be redelivered from the App's
+      // settings (the dispatcher's gh sweep covers a lost one); the delivery GUID as message id
+      // makes each stream's duplicate window drop the copy that already got through.
+      let ack1, ack2;
+      try { ack1 = await publish(out.subject, out.event, delivery); } catch (e) { log(`publish ${out.subject}: ${e.message}`); return send(res, 503); }
+      try { ack2 = await publish(out.v2.subject, out.v2.event, delivery); } catch (e) { log(`publish ${out.v2.subject}: ${e.message}`); return send(res, 503); }
+      log(`${tag} ${ack1 && ack1.duplicate && ack2 && ack2.duplicate ? "duplicate" : "published"} ${out.subject} ${out.v2.subject}`);
     } else {
       log(`${tag} trigger-only`);
     }
