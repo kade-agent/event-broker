@@ -516,3 +516,13 @@ test("summary: a failing summary write exits 3 and acks nothing", async () => {
   assert.strictEqual(await p, 3);
   assert.ok(!h.calls.some((c) => c.startsWith("ack")));
 });
+
+// ---- decision 20 (S2): red on main events ----
+
+test("line: red= on a main event, names joined by a comma, - when none; a name with a space quotes the value", () => {
+  const m = (signal, red) => msg({ signal, repo: "a/b", branch: "main", check: { name: "Rust", url: null }, red, delivery: "D1" });
+  assert.strictEqual(formatLine(m("main_failed", ["Lint", "Rust"]), false), "main_failed a/b@main check=Rust red=Lint,Rust delivery=D1");
+  assert.strictEqual(formatLine(m("main_passed", []), false), "main_passed a/b@main check=Rust red=- delivery=D1");
+  assert.strictEqual(formatLine(m("main_failed", ["Rust check"]), false), 'main_failed a/b@main check=Rust red="Rust check" delivery=D1');
+  assert.strictEqual(formatLine(msg({ signal: "pr_merged", repo: "a/b", pr: 1, delivery: "D1" }), false), "pr_merged a/b#1 delivery=D1");
+});
