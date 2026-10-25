@@ -57,11 +57,41 @@ test("a signed merge is published with the delivery GUID as its message id", asy
   try {
     const res = await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository }, { delivery: "abc-123" });
     assert.strictEqual(res.status, 202);
-    assert.strictEqual(s.published.length, 1);
+    assert.strictEqual(s.published.length, 2);
     assert.strictEqual(s.published[0].subject, "github.stella-rain.app.pr.7.pull_request");
     assert.strictEqual(s.published[0].msgId, "abc-123");
     assert.strictEqual(s.published[0].event.delivery, "abc-123");
   } finally { await s.close(); }
+});
+
+test("each delivery publishes v1 then v2, both with the delivery GUID as message id", async () => {
+  const s = await start();
+  try {
+    await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository }, { delivery: "abc-123" });
+    assert.deepStrictEqual(s.published.map((p) => [p.subject, p.msgId]), [
+      ["github.stella-rain.app.pr.7.pull_request", "abc-123"],
+      ["ev.stella-rain.app.pr.7.pr_merged", "abc-123"],
+    ]);
+    assert.strictEqual(s.published[1].event.v, 2);
+    assert.strictEqual(s.published[1].event.signal, "pr_merged");
+  } finally { await s.close(); }
+});
+
+test("a failing v2 publish answers 503; a failing v1 publish publishes no v2", async () => {
+  const seen = [];
+  const s = await start({ publish: async (subject) => { seen.push(subject); if (subject.startsWith("ev.")) throw new Error("nats down"); } });
+  try {
+    const res = await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository });
+    assert.strictEqual(res.status, 503);
+    assert.strictEqual(seen.length, 2);
+    assert.deepStrictEqual(s.logs, ["publish ev.stella-rain.app.pr.7.pr_merged: nats down"]);
+  } finally { await s.close(); }
+  const seen1 = [];
+  const t = await start({ publish: async (subject) => { seen1.push(subject); throw new Error("nats down"); } });
+  try {
+    assert.strictEqual((await deliver(t.base, "pull_request", { action: "closed", pull_request: pr, repository })).status, 503);
+    assert.deepStrictEqual(seen1, ["github.stella-rain.app.pr.7.pull_request"]);
+  } finally { await t.close(); }
 });
 
 test("a push to main is published and starts a mergeability check", async () => {
@@ -69,7 +99,7 @@ test("a push to main is published and starts a mergeability check", async () => 
   try {
     const res = await deliver(s.base, "push", { ref: "refs/heads/main", after: "d", repository });
     assert.strictEqual(res.status, 202);
-    assert.strictEqual(s.published.length, 1);
+    assert.strictEqual(s.published.length, 2);
     assert.deepStrictEqual(s.triggers, [{ repo: "stella-rain/app", base: "main" }]);
   } finally { await s.close(); }
 });
@@ -108,12 +138,12 @@ test("a merge logs one published line; a duplicate PubAck logs a duplicate line"
   const s = await start();
   try {
     await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository }, { delivery: "abc-123" });
-    assert.deepStrictEqual(s.logs, ["abc-123 pull_request.closed -> published github.stella-rain.app.pr.7.pull_request"]);
+    assert.deepStrictEqual(s.logs, ["abc-123 pull_request.closed -> published github.stella-rain.app.pr.7.pull_request ev.stella-rain.app.pr.7.pr_merged"]);
   } finally { await s.close(); }
   const d = await start({ publish: async () => ({ duplicate: true }) });
   try {
     await deliver(d.base, "pull_request", { action: "closed", pull_request: pr, repository }, { delivery: "abc-123" });
-    assert.deepStrictEqual(d.logs, ["abc-123 pull_request.closed -> duplicate github.stella-rain.app.pr.7.pull_request"]);
+    assert.deepStrictEqual(d.logs, ["abc-123 pull_request.closed -> duplicate github.stella-rain.app.pr.7.pull_request ev.stella-rain.app.pr.7.pr_merged"]);
   } finally { await d.close(); }
 });
 
@@ -126,7 +156,7 @@ test("a dropped, a trigger-only and a push delivery each log one line", async ()
     assert.deepStrictEqual(s.logs, [
       "guid-1 issues.opened -> dropped",
       "guid-1 pull_request.synchronize -> trigger-only",
-      `guid-1 push -> published ${s.published[0].subject}`,
+      `guid-1 push -> published ${s.published[0].subject} ${s.published[1].subject}`,
     ]);
   } finally { await s.close(); }
 });
@@ -170,6 +200,6 @@ test("the owner is compared case-insensitively", async () => {
   try {
     const res = await deliver(s.base, "pull_request", { action: "closed", pull_request: pr, repository: { ...repository, owner: { login: "Stella-Rain" } } });
     assert.strictEqual(res.status, 202);
-    assert.strictEqual(s.published.length, 1);
+    assert.strictEqual(s.published.length, 2);
   } finally { await s.close(); }
 });
