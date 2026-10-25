@@ -413,3 +413,17 @@ test("the seed never appears in the output of a failed run", async () => {
   await run(h.deps);
   assert.ok(!h.out.join("\n").includes("SUA"));
 });
+
+test("ending: a connect that finishes after the run ended is closed", async () => {
+  const h = harness();
+  let release;
+  const late = new Promise((r) => { release = r; });
+  h.deps.connect = async () => { await late; return h.conn; };
+  const p = run(h.deps);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+  release();
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.ok(h.calls.includes("close"));
+  assert.strictEqual(h.out.length, 0);
+});

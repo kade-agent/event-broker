@@ -72,7 +72,11 @@ async function main() {
   });
 }
 
-main().then((code) => process.exit(code), (e) => {
-  console.log(`BROKER-DOWN ${e.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().then((code) => process.exit(code), (e) => {
+    console.log(`BROKER-DOWN ${e.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { adapter };

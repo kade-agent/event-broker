@@ -16,6 +16,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");
 const { jetstream, jetstreamManager, AckPolicy, DeliverPolicy } = require("@nats-io/jetstream");
+const { adapter } = require("../../client/watch");
 const { ensureStream } = require("../../src/stream");
 const { blank } = require("../../src/normalize");
 
@@ -145,5 +146,23 @@ test("watch.js: with stdout closed after WATCH-ARMED it exits 3 without acking, 
     if (second) second.child.kill("SIGKILL");
     await nc.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("watch.js adapter: pending() asks the server each time, so WATCH-ALIVE does not repeat a stale count", { skip }, async () => {
+  const id = randomUUID().slice(0, 8);
+  const repo = `wc-pending-${id}`;
+  const nc = await receiver();
+  const reader = await connect({ servers: env.NATS_URL, authenticator: nkeyAuthenticator(new TextEncoder().encode(env.READER_SEED_A)), timeout: 3000, reconnect: false });
+  try {
+    await setup(nc, `wc-${id}`, repo);
+    const a = adapter(reader, A, `wc-${id}`);
+    assert.strictEqual(await a.pending(), 0);
+    await publish(nc, repo, message(repo, "ci_passed"));
+    assert.strictEqual(await a.pending(), 1);
+    assert.deepStrictEqual(await a.streamSubjects(), [`ev.${A}.>`]);
+  } finally {
+    await reader.close();
+    await nc.close();
   }
 });
