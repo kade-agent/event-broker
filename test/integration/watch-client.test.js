@@ -167,3 +167,23 @@ test("watch.js adapter: pending() asks the server each time, so WATCH-ALIVE does
     await nc.close();
   }
 });
+
+// Decision 21 (S3): watch.js --state reads STATE with the reader key and exits.
+test("watch.js --state prints the red line and the PR snapshots the receiver wrote, then exits 0", { skip }, async () => {
+  const { execFile } = require("node:child_process");
+  const repo = `st-${randomUUID().slice(0, 8)}`;
+  const nc = await receiver();
+  try {
+    await ensureStream(await jetstreamManager(nc), A);
+    const js = jetstream(nc);
+    await js.publish(`state.${A}.${repo}.red`, JSON.stringify({ red: ["Rust"] }));
+    await js.publish(`state.${A}.${repo}.pr.7`, JSON.stringify({ repo: `${A}/${repo}`, pr: 7, state: "open", sha: "abcdef12345", checks: {}, updated_at: "T" }));
+    await js.publish(`state.${A}.${repo}.pr.7.mergeable`, JSON.stringify({ mergeable_state: "clean", sha: "abcdef12345" }));
+  } finally { await nc.close(); }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "watch-state-"));
+  const out = await new Promise((resolve) => execFile(process.execPath, [WATCH, "--owner", A, "--state", `${A}/${repo}`], {
+    env: { PATH: env.PATH, HOME: dir, EVENT_BROKER_URL: env.NATS_URL, EVENT_BROKER_CLOUD_SEED: env.READER_SEED_A,
+      EVENT_BROKER_NKEY_FILE: path.join(dir, "reader.nk") }, timeout: TIMEOUT }, (e, stdout) => resolve({ code: e ? e.code : 0, stdout })));
+  assert.strictEqual(out.code, 0, out.stdout);
+  assert.deepStrictEqual(out.stdout.trim().split("\n"), [`STATE ${A}/${repo} red=Rust`, `pr ${A}/${repo}#7 state=open sha=abcdef1 updated_at=T`]);
+});
