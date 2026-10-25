@@ -457,14 +457,14 @@ test("summary line: --json is one object with every event, ungrouped", () => {
 async function summaryRun(h, items) {
   const queue = items.map((m) => ({ ...m, ack: async () => { h.calls.push(`ack:${m.seq}`); } }));
   h.conn.next = async () => { h.nexts++; return queue.length ? queue.shift() : new Promise(() => {}); };
-  const p = run(h.deps);
+  const done = run(h.deps);
   for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
-  return p;
+  return { done };
 }
 
 test("summary: events of one window are one line after 30 s, acked after it; nothing before", async () => {
   const h = harness({ pending: 0, window: 30 });
-  const p = summaryRun(h, [ev(1), ev(2)]);
+  const { done: p } = await summaryRun(h, [ev(1), ev(2)]);
   await tickAt(h, 29000);
   assert.deepStrictEqual(h.out, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=0"]);
   assert.ok(!h.calls.some((c) => c.startsWith("ack")));
@@ -478,7 +478,7 @@ test("summary: events of one window are one line after 30 s, acked after it; not
 test("summary: the window starts at its first event, not at the start of the watch", async () => {
   const h = harness({ pending: 0, window: 30 });
   h.clock = 50000;
-  const p = summaryRun(h, [ev(1)]);
+  const { done: p } = await summaryRun(h, [ev(1)]);
   await tickAt(h, 75000);
   assert.strictEqual(h.out.length, 1);
   await tickAt(h, 80000);
@@ -489,7 +489,7 @@ test("summary: the window starts at its first event, not at the start of the wat
 
 test("summary: the backlog counted at start is one summary as soon as it is read", async () => {
   const h = harness({ pending: 2, window: 30 });
-  const p = summaryRun(h, [ev(1), ev(2), ev(3)]);
+  const { done: p } = await summaryRun(h, [ev(1), ev(2), ev(3)]);
   assert.strictEqual(h.out[1], "SUMMARY 2 events | pr_merged a/b#1 delivery=D1 | pr_merged a/b#2 delivery=D2");
   assert.strictEqual(h.out.length, 2); // event 3 waits for its own window
   await tickAt(h, 30000);
@@ -500,7 +500,7 @@ test("summary: the backlog counted at start is one summary as soon as it is read
 
 test("summary: a watch that ends with a window open prints and acks nothing of it", async () => {
   const h = harness({ pending: 0, window: 30 });
-  const p = summaryRun(h, [ev(1)]);
+  const { done: p } = await summaryRun(h, [ev(1)]);
   h.ac.abort();
   assert.strictEqual(await p, 0);
   assert.strictEqual(h.out.length, 1);
@@ -511,7 +511,7 @@ test("summary: a failing summary write exits 3 and acks nothing", async () => {
   const h = harness({ pending: 0, window: 30 });
   const write = h.deps.write;
   h.deps.write = async (l) => { if (l.startsWith("SUMMARY")) throw new Error("EPIPE"); return write(l); };
-  const p = summaryRun(h, [ev(1)]);
+  const { done: p } = await summaryRun(h, [ev(1)]);
   await tickAt(h, 30000);
   assert.strictEqual(await p, 3);
   assert.ok(!h.calls.some((c) => c.startsWith("ack")));

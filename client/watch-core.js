@@ -13,14 +13,18 @@ class Fatal extends Error {
 }
 
 function parseArgs(argv) {
-  const out = { owner: undefined, profile: undefined, json: false };
+  const out = { owner: undefined, profile: undefined, json: false, window: 30 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") out.json = true;
-    else if (a === "--owner" || a === "--profile") {
+    else if (a === "--owner" || a === "--profile" || a === "--window") {
       if (i + 1 >= argv.length) throw new Fatal(`${a} needs a value`, 2);
       out[a.slice(2)] = argv[++i];
     } else throw new Fatal(`unknown argument ${a}`, 2);
+  }
+  if (typeof out.window === "string") {
+    if (!/^\d+$/.test(out.window)) throw new Fatal("--window needs a whole number of seconds", 2);
+    out.window = Number(out.window);
   }
   return out;
 }
@@ -73,7 +77,7 @@ function resolveSettings({ argv, env, home, fs, platform }) {
   }
 
   return {
-    owner, url, keyFile, json: args.json,
+    owner, url, keyFile, json: args.json, window: args.window,
     profile: args.profile || "dispatcher",
     pidFile: get("WATCH_PIDFILE") || path.join(dir, `watch-${owner}.pid`),
   };
@@ -102,6 +106,22 @@ function formatLine(m, json) {
   return parts.join(" ");
 }
 
+// Decision 17: one SUMMARY line for a window's events. Events with the same signal, target and
+// check are one entry, the latest, with count= when there are more; entries keep first-seen order.
+// --json: every event, ungrouped.
+function formatSummary(events, json) {
+  if (json) return JSON.stringify({ summary: true, count: events.length, events });
+  const groups = new Map();
+  for (const m of events) {
+    const n = m.pr ?? m.issue;
+    const key = `${m.signal} ${m.repo}${n != null ? `#${n}` : `@${m.branch}`} ${m.check ? m.check.name : ""}`;
+    const g = groups.get(key);
+    if (g) { g.last = m; g.count++; } else groups.set(key, { last: m, count: 1 });
+  }
+  const entries = [...groups.values()].map((g) => formatLine(g.last, false) + (g.count > 1 ? ` count=${g.count}` : ""));
+  return [`SUMMARY ${events.length} event${events.length === 1 ? "" : "s"}`, ...entries].join(" | ");
+}
+
 const SEEN_MAX = 1000; // stream sequences remembered, to ack a redelivery without printing it again
 const ALIVE_MS = 600000; // no line printed for this long -> WATCH-ALIVE
 const DOWN_MS = 120000; // disconnected for longer than this -> BROKER-DOWN
@@ -110,12 +130,13 @@ const CONNECT_RETRY_MS = 5000;
 const PULL_RETRY_MS = 1000;
 
 // The watch. Resolves to the exit code: 0 a quiet end, 1 BROKER-DOWN, 2 settings, 3 a failed write.
-// deps: settings {owner, profile, json, pidFile}; connect(hooks) -> conn {streamSubjects(), pending(),
+// deps: settings {owner, profile, json, window (s, 0 = a line per event), pidFile}; connect(hooks) -> conn {streamSubjects(), pending(),
 // next() -> {seq, data, ack()} | null, close()}, with hooks {disconnected(), reconnected()};
 // write(line) (rejects on failure); now(); sleep(ms); every(ms, fn) -> cancel; checkParent() (throws
 // when the parent is gone); fs; pid; signal (an AbortSignal: SIGINT, SIGTERM, SIGHUP).
 async function run(d) {
   const { owner, profile, json, pidFile } = d.settings;
+  const windowMs = (d.settings.window ?? 30) * 1000;
   let ended = false;
   let code = 0;
   let conn = null;
@@ -127,6 +148,10 @@ async function run(d) {
   let finish;
   const done = new Promise((resolve) => { finish = resolve; });
   const seen = new Set();
+  let batch = []; // the open window's messages, acked after their SUMMARY is written
+  let batchStart = null;
+  let backlog = 0; // messages of the start backlog still to read; at 0 it is one summary at once
+  let flushing = null;
 
   // Stops everything; the optional line (BROKER-DOWN) is written before the run resolves.
   const end = (exitCode, line) => {
@@ -153,6 +178,18 @@ async function run(d) {
     } catch { return false; }
   };
   const ack = async (m) => { try { await m.ack(); } catch { /* it comes back after the ack wait */ } };
+  const remember = (seq) => {
+    seen.add(seq);
+    if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value);
+  };
+  // Writes the open window as one line, then acks it. One flush at a time (the loop and the tick).
+  const flush = () => (flushing ??= (async () => {
+    const items = batch;
+    batch = [];
+    batchStart = null;
+    if (items.length && (await emit(formatSummary(items.map((m) => m.data), json)))) for (const m of items) await ack(m);
+  })().finally(() => { flushing = null; }));
+  const windowDue = () => batch.length > 0 && d.now() - batchStart >= windowMs;
 
   const hooks = {
     disconnected: () => { if (disconnectedAt == null) disconnectedAt = d.now(); },
@@ -164,6 +201,7 @@ async function run(d) {
     if (ended) return;
     try { d.checkParent(); } catch { end(0); return; }
     if (disconnectedAt != null && d.now() - disconnectedAt > DOWN_MS) { down(new Error("disconnected for over 120 s")); return; }
+    if (windowDue()) await flush();
     if (!armed || aliveBusy || d.now() - lastLine < ALIVE_MS) return;
     aliveBusy = true;
     try {
@@ -201,6 +239,7 @@ async function run(d) {
     if (superseded()) { end(0); return; }
     if (!(await emit(`WATCH-ARMED ${status(pending)}`))) return;
     armed = true;
+    backlog = pending;
 
     let fails = 0;
     while (!ended) {
@@ -215,10 +254,20 @@ async function run(d) {
       if (!m || ended) continue;
       if (seen.has(m.seq)) { await ack(m); continue; }
       // Anything without a signal and a repo cannot be a line: drop it, or it would come back forever.
-      if (m.data && m.data.signal && m.data.repo && !(await emit(formatLine(m.data, json)))) return;
-      seen.add(m.seq);
-      if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value);
-      await ack(m);
+      const valid = m.data && m.data.signal && m.data.repo;
+      if (windowMs === 0) {
+        if (valid && !(await emit(formatLine(m.data, json)))) return;
+        remember(m.seq);
+        await ack(m);
+        continue;
+      }
+      remember(m.seq);
+      if (valid) {
+        if (batchStart == null) batchStart = d.now();
+        batch.push(m);
+      } else await ack(m);
+      if (backlog > 0 && --backlog === 0) await flush();
+      else if (windowDue()) await flush();
     }
   }
 
@@ -233,4 +282,4 @@ async function run(d) {
   return code;
 }
 
-module.exports = { Fatal, parseArgs, parseEnvFile, resolveSettings, formatLine, run };
+module.exports = { Fatal, parseArgs, parseEnvFile, resolveSettings, formatLine, formatSummary, run };
