@@ -180,7 +180,8 @@ test("decision 19: the state is the store's key state.<owner>.<repo>.main.<workf
   const backend = { read: async (k) => values[k] ?? null, write: async (k, v) => { values[k] = v; }, log: () => {} };
   const runs = createMainRuns({ store: createStateStore(backend) });
   assert.deepStrictEqual(await signalsOf(runs, [mainRun("success", "Rust check")]), ["main_passed"]);
-  assert.deepStrictEqual(values, { "state.stella-rain.core.main.Rust_check": { passed: true } });
+  assert.deepStrictEqual(values, { "state.stella-rain.core.main.Rust_check": { passed: true },
+    "state.stella-rain.core.red": { red: [] } }); // the red list since decision 20
   const restarted = createMainRuns({ store: createStateStore(backend) });
   assert.deepStrictEqual(await signalsOf(restarted, [mainRun("success", "Rust check")]), ["main_still_passed"]);
 });

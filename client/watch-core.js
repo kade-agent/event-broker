@@ -97,6 +97,7 @@ function formatLine(m, json) {
     ["check", m.check && m.check.name],
     ["url", (m.check && m.check.url) || (m.comment && m.comment.url)],
     ["conclusion", String(m.signal).endsWith("_other") ? m.conclusion : null],
+    ["red", Array.isArray(m.red) ? (m.red.length ? m.red.join(",") : "-") : null], // decision 20
     ["label", m.label],
     ["state_reason", m.state_reason],
     ["author", m.comment && m.comment.author],

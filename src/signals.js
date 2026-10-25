@@ -67,18 +67,40 @@ function v2Of(e, defaultBranch) {
 // caller awaits commit() after both publishes succeed, so a delivery answered 503 gets the same
 // signal when it is redelivered. Decision 19: the state is the store's key
 // state.<owner>.<repo>.main.<workflow> ({passed}), kept in STATE, so a restart repeats nothing.
+// Decision 20: each main event carries red, the sorted workflows failing on that repository's main
+// once it counts, kept as state.<owner>.<repo>.red ({red}) and updated one repository at a time.
 function createMainRuns({ store = createStateStore() } = {}) {
+  const queues = new Map(); // red key -> the last update queued for it
+  const serial = (k, fn) => {
+    const next = (queues.get(k) || Promise.resolve()).then(fn);
+    queues.set(k, next.catch(() => {}));
+    return next;
+  };
+  const withRed = (list, name, failed) => {
+    const red = new Set(list);
+    if (failed) red.add(name); else red.delete(name);
+    return [...red].sort();
+  };
   return {
     async apply(v2) {
       const { signal } = v2.event;
       if (signal !== "main_passed" && signal !== "main_failed") return { v2, commit: async () => {} };
-      const key = stateKey(v2.event.repo, "main", (v2.event.check && v2.event.check.name) || "_");
-      const commit = () => store.put(key, { passed: signal === "main_passed" });
-      if (signal === "main_failed") return { v2, commit };
-      const last = await store.get(key);
-      if (!last || last.passed !== true) return { v2, commit };
-      const still = "main_still_passed";
-      return { v2: { subject: v2.subject.replace(/\.main_passed$/, `.${still}`), event: { ...v2.event, signal: still } }, commit };
+      const failed = signal === "main_failed";
+      const name = (v2.event.check && v2.event.check.name) || "_";
+      const key = stateKey(v2.event.repo, "main", name);
+      const redKey = stateKey(v2.event.repo, "red");
+      const red = withRed(((await store.get(redKey)) || { red: [] }).red, name, failed);
+      const commit = async () => {
+        await store.put(key, { passed: !failed });
+        await serial(redKey, async () => {
+          const now = (await store.get(redKey)) || { red: [] };
+          await store.put(redKey, { red: withRed(now.red, name, failed) });
+        });
+      };
+      const last = failed ? null : await store.get(key);
+      const still = last && last.passed === true ? "main_still_passed" : null;
+      const subject = still ? v2.subject.replace(/\.main_passed$/, `.${still}`) : v2.subject;
+      return { v2: { subject, event: { ...v2.event, ...(still ? { signal: still } : {}), red } }, commit };
     },
   };
 }
