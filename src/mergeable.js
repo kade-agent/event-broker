@@ -10,7 +10,8 @@ const { stateKey, createStateStore } = require("./stream");
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function createMergeWatch({ gh, publish, store = createStateStore(), sleep = wait, maxTries = 6, baseDelayMs = 2000, onError = (e) => console.error(e.message), log = console.error }) {
+// snapshots (decision 22): every PR read is written into its snapshot, changed or not.
+function createMergeWatch({ gh, publish, store = createStateStore(), snapshots = null, sleep = wait, maxTries = 6, baseDelayMs = 2000, onError = (e) => console.error(e.message), log = console.error }) {
   async function read(repo, n) {
     for (let i = 0; i < maxTries; i++) {
       const pr = await gh.get(repo, `/pulls/${n}`);
@@ -23,6 +24,7 @@ function createMergeWatch({ gh, publish, store = createStateStore(), sleep = wai
   async function check(repo, n) {
     const pr = await read(repo, n);
     if (!pr) return;
+    if (snapshots) await snapshots.repair(repo, pr);
     const key = `${repo}#${n}`;
     const stateAt = stateKey(repo, "pr", n, "mergeable");
     const last = await store.get(stateAt);

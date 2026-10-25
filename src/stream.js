@@ -103,35 +103,77 @@ function createStateStore({ read = async () => null, write = async () => {}, log
 const EMPTY_SNAPSHOT = { branch: null, sha: null, state: "open", draft: null, auto_merge: null,
   mergeable_state: null, checks: {}, review: null, last_comment: null, updated_at: null };
 
+const CHECK_EVENTS = new Set(["workflow_run", "check_run", "check_suite"]);
+
+// Decision 22: only a PR-level event moves sha; a check sets it only while it is null, and a check
+// for another sha is a late result from an older head, so it is ignored.
 function nextSnapshot(prev, e, at) {
   const s = prev ? { ...prev, checks: { ...(prev.checks || {}) } } : { repo: e.repo, pr: e.pr, ...EMPTY_SNAPSHOT, checks: {} };
+  const isCheck = CHECK_EVENTS.has(e.event);
+  const stale = isCheck && e.sha && s.sha && e.sha !== s.sha;
   if (e.branch) s.branch = e.branch;
-  if (e.sha && e.sha !== s.sha) { s.sha = e.sha; s.checks = {}; }
+  if (e.sha && e.sha !== s.sha && !stale) { s.sha = e.sha; s.checks = {}; }
   if (e.event === "pull_request") s.state = e.signal === "pr_merged" ? "merged" : e.signal === "pr_closed" ? "closed" : "open";
   if (e.event === "pull_request" || e.event === "mergeable") {
     if (e.draft != null) s.draft = e.draft;
     if (e.auto_merge != null) s.auto_merge = e.auto_merge;
   }
   if (e.mergeable_state) s.mergeable_state = e.mergeable_state;
-  if (["workflow_run", "check_run", "check_suite"].includes(e.event) && e.check && e.check.name) s.checks[e.check.name] = e.conclusion;
+  if (isCheck && !stale && e.check && e.check.name) s.checks[e.check.name] = e.conclusion;
   if (e.event === "pull_request_review" && e.conclusion) s.review = String(e.conclusion).toLowerCase();
   if (e.event === "issue_comment" && e.comment) s.last_comment = { author: e.comment.author, url: e.comment.url };
   s.updated_at = at;
   return s;
 }
 
-// update(v2 event) runs one update per PR at a time, so two events on one PR both land.
+// update(v2 event) and repair(repo, GitHub PR) run one change per PR at a time, so two on one PR
+// both land. A snapshot that learns its branch writes state.<owner>.<repo>.branch.<branch> ({pr}),
+// which a push_branch follows to its PR (decision 22).
 function createPrSnapshots({ store = createStateStore(), now = () => new Date().toISOString() } = {}) {
   const queues = new Map();
+  const serial = (key, fn) => {
+    const next = (queues.get(key) || Promise.resolve()).then(fn);
+    queues.set(key, next.catch(() => {}));
+    return next;
+  };
+  const save = async (key, prev, s) => {
+    await store.put(key, s);
+    if (s.branch && (!prev || prev.branch !== s.branch)) await store.put(stateKey(s.repo, "branch", s.branch), { pr: s.pr });
+  };
   return {
-    update(e) {
-      if (e.pr == null) return Promise.resolve();
+    async update(e) {
+      if (e.signal === "push_branch") {
+        const at = await store.get(stateKey(e.repo, "branch", e.branch));
+        if (!at) return;
+        const key = stateKey(e.repo, "pr", at.pr);
+        await serial(key, async () => {
+          const prev = await store.get(key);
+          if (prev && e.sha && prev.sha !== e.sha) await store.put(key, { ...prev, sha: e.sha, checks: {}, updated_at: now() });
+        });
+        return;
+      }
+      if (e.pr == null) return;
       const key = stateKey(e.repo, "pr", e.pr);
-      const next = (queues.get(key) || Promise.resolve()).then(async () => {
-        await store.put(key, nextSnapshot(await store.get(key), e, now()));
+      await serial(key, async () => {
+        const prev = await store.get(key);
+        await save(key, prev, nextSnapshot(prev, e, now()));
       });
-      queues.set(key, next.catch(() => {}));
-      return next;
+    },
+    // Decision 22: what the mergeable check read from GitHub is the PR's truth.
+    async repair(repo, pr) {
+      const key = stateKey(repo, "pr", pr.number);
+      await serial(key, async () => {
+        const prev = await store.get(key);
+        const s = prev ? { ...prev, checks: { ...(prev.checks || {}) } } : { repo, pr: pr.number, ...EMPTY_SNAPSHOT, checks: {} };
+        if (pr.head.sha !== s.sha) { s.sha = pr.head.sha; s.checks = {}; }
+        s.branch = pr.head.ref;
+        s.draft = pr.draft === true;
+        s.auto_merge = pr.auto_merge != null;
+        s.state = pr.merged === true ? "merged" : pr.state === "closed" ? "closed" : "open";
+        if (pr.mergeable_state && pr.mergeable_state !== "unknown") s.mergeable_state = pr.mergeable_state;
+        s.updated_at = now();
+        await save(key, prev, s);
+      });
     },
   };
 }
@@ -141,7 +183,7 @@ function createPrSnapshots({ store = createStateStore(), now = () => new Date().
 function withSnapshots(publish, snapshots, log = console.error) {
   return async (subject, event, msgID) => {
     const ack = await publish(subject, event, msgID);
-    if (subject.startsWith("ev.") && event && event.pr != null) {
+    if (subject.startsWith("ev.") && event && (event.pr != null || event.signal === "push_branch")) {
       try { await snapshots.update(event); } catch (e) { log(`snapshot ${subject}: ${e.message}`); }
     }
     return ack;
