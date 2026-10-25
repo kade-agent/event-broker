@@ -2,7 +2,7 @@
 // client/watch-core.js with every effect injected: no network, no real files, no real clock.
 const test = require("node:test");
 const assert = require("node:assert");
-const { resolveSettings, parseArgs, parseEnvFile, Fatal } = require("../client/watch-core");
+const { resolveSettings, parseArgs, parseEnvFile, formatLine, Fatal } = require("../client/watch-core");
 
 const HOME = "/home/u";
 const BROKER_ENV = `${HOME}/.claude/dispatcher/broker.env`;
@@ -108,4 +108,69 @@ test("key: missing file and no seed -> exit 2 naming the path; the seed never ap
 test("pidfile: WATCH_PIDFILE, else <home>/.claude/dispatcher/watch-<owner>.pid", () => {
   assert.strictEqual(resolve().pidFile, `${HOME}/.claude/dispatcher/watch-kade-agent.pid`);
   assert.strictEqual(resolve({ env: { EVENT_BROKER_URL: "u", WATCH_PIDFILE: "/p/x.pid" } }).pidFile, "/p/x.pid");
+});
+
+// The v2 object of design section 9, with the v1 fields null unless a test sets them.
+const msg = (o) => ({
+  v: 2, signal: null, delivery: "D1", repo: "stella-rain/app", pr: null, branch: null, event: null, action: null,
+  merged: null, draft: null, auto_merge: null, conclusion: null, check: null, mergeable_state: null, sha: null,
+  issue: null, label: null, state_reason: null, comment: null, ...o,
+});
+
+test("line: pr_merged with branch, 7-character sha and delivery", () => {
+  assert.strictEqual(
+    formatLine(msg({ signal: "pr_merged", repo: "stella-rain/core", pr: 365, branch: "claude/br1e-worst-minute", sha: "9f2c1e0aaaa", delivery: "1f2e3d" }), false),
+    "pr_merged stella-rain/core#365 branch=claude/br1e-worst-minute sha=9f2c1e0 delivery=1f2e3d");
+});
+
+test("line: a branch-scope event is <repo>@<branch> and carries no branch= field", () => {
+  assert.strictEqual(
+    formatLine(msg({ signal: "main_failed", repo: "stella-rain/app", branch: "main", sha: "9f2c1e0", conclusion: "failure",
+      check: { name: "test", url: "https://github.com/stella-rain/app/actions/runs/1" }, delivery: "D9" }), false),
+    "main_failed stella-rain/app@main sha=9f2c1e0 check=test url=https://github.com/stella-rain/app/actions/runs/1 delivery=D9");
+});
+
+test("line: a value with a space is a JSON string", () => {
+  assert.strictEqual(
+    formatLine(msg({ signal: "ci_failed", repo: "kade-agent/event-broker", pr: 17, branch: "claude/x", sha: "abcdef0123",
+      check: { name: "Line endings", url: "https://github.com/kade-agent/event-broker/runs/2" }, delivery: "D2" }), false),
+    'ci_failed kade-agent/event-broker#17 branch=claude/x sha=abcdef0 check="Line endings" url=https://github.com/kade-agent/event-broker/runs/2 delivery=D2');
+});
+
+test("line: a value with a quote or an equals sign is a JSON string", () => {
+  const line = formatLine(msg({ signal: "ci_failed", pr: 1, check: { name: 'a"b', url: "https://x/?q=1" } }), false);
+  assert.ok(line.includes('check="a\\"b"'));
+  assert.ok(line.includes('url="https://x/?q=1"'));
+});
+
+test("line: conclusion= only on an *_other signal that has one", () => {
+  assert.ok(formatLine(msg({ signal: "ci_other", pr: 3, conclusion: "cancelled" }), false).includes(" conclusion=cancelled"));
+  assert.ok(formatLine(msg({ signal: "merge_other", pr: 3, mergeable_state: "has_hooks", conclusion: "x" }), false).includes(" conclusion=x"));
+  assert.ok(!formatLine(msg({ signal: "ci_failed", pr: 3, conclusion: "failure" }), false).includes("conclusion"));
+  assert.ok(!formatLine(msg({ signal: "merge_other", pr: 3 }), false).includes("conclusion"));
+});
+
+test("line: issue number, label, state_reason, comment author and url", () => {
+  assert.strictEqual(formatLine(msg({ signal: "issue_labeled", repo: "a/b", issue: 5, label: "ready", delivery: "D3" }), false),
+    "issue_labeled a/b#5 label=ready delivery=D3");
+  assert.strictEqual(formatLine(msg({ signal: "issue_closed", repo: "a/b", issue: 5, state_reason: "not_planned", delivery: "D4" }), false),
+    "issue_closed a/b#5 state_reason=not_planned delivery=D4");
+  assert.strictEqual(formatLine(msg({ signal: "pr_comment", repo: "a/b", pr: 6, branch: "x", comment: { id: 1, author: "kade", url: "https://c/1" }, delivery: "D5" }), false),
+    "pr_comment a/b#6 branch=x url=https://c/1 author=kade delivery=D5");
+});
+
+test("line: the check url beats the comment url", () => {
+  assert.ok(formatLine(msg({ signal: "ci_failed", pr: 1, check: { name: "t", url: "https://check" }, comment: { url: "https://comment" } }), false).includes("url=https://check"));
+});
+
+test("line: a null delivery is left out", () => {
+  assert.strictEqual(formatLine(msg({ signal: "pr_closed", repo: "a/b", pr: 1, delivery: null }), false), "pr_closed a/b#1");
+});
+
+test("line: --json prints the parseable v2 object on one line", () => {
+  const m = msg({ signal: "pr_merged", pr: 4, branch: "b", sha: "9f2c1e0aaaa" });
+  const line = formatLine(m, true);
+  assert.ok(!line.includes("\n"));
+  assert.deepStrictEqual(JSON.parse(line), m);
+  assert.strictEqual(JSON.parse(line).v, 2);
 });
