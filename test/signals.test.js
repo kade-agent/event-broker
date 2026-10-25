@@ -184,3 +184,51 @@ test("decision 19: the state is the store's key state.<owner>.<repo>.main.<workf
   const restarted = createMainRuns({ store: createStateStore(backend) });
   assert.deepStrictEqual(await signalsOf(restarted, [mainRun("success", "Rust check")]), ["main_still_passed"]);
 });
+
+// Decision 20 (S2): main events carry red, the workflows failing on that repository's main.
+const apply1 = async (runs, v2) => { const r = await runs.apply(v2); await r.commit(); return r.v2; };
+
+test("red: the list as it stands once the event counts, sorted, on main_failed, main_passed and main_still_passed", async () => {
+  const runs = createMainRuns();
+  const seen = [];
+  for (const [c, w] of [["failure", "Rust"], ["failure", "Lint"], ["success", "Rust"], ["success", "Lint"], ["success", "Lint"]]) {
+    const v2 = await apply1(runs, mainRun(c, w));
+    seen.push([v2.event.signal, v2.event.red]);
+  }
+  assert.deepStrictEqual(seen, [
+    ["main_failed", ["Rust"]], ["main_failed", ["Lint", "Rust"]], ["main_passed", ["Lint"]],
+    ["main_passed", []], ["main_still_passed", []],
+  ]);
+});
+
+test("red: kept per repository in state.<owner>.<repo>.red; a restarted receiver carries it on", async () => {
+  const values = {};
+  const backend = { read: async (k) => values[k] ?? null, write: async (k, v) => { values[k] = v; }, log: () => {} };
+  await apply1(createMainRuns({ store: createStateStore(backend) }), mainRun("failure", "Rust check"));
+  await apply1(createMainRuns({ store: createStateStore(backend) }), mainRun("failure", "Rust", "stella-rain/app"));
+  assert.deepStrictEqual(values["state.stella-rain.core.red"], { red: ["Rust check"] });
+  assert.deepStrictEqual(values["state.stella-rain.app.red"], { red: ["Rust"] });
+  const v2 = await apply1(createMainRuns({ store: createStateStore(backend) }), mainRun("failure", "Lint"));
+  assert.deepStrictEqual(v2.event.red, ["Lint", "Rust check"]);
+});
+
+test("red: without commit the stored list does not move", async () => {
+  const runs = createMainRuns();
+  assert.deepStrictEqual((await runs.apply(mainRun("failure", "Rust"))).v2.event.red, ["Rust"]);
+  assert.deepStrictEqual((await runs.apply(mainRun("failure", "Lint"))).v2.event.red, ["Lint"]);
+});
+
+test("red: two runs that finish together both end up in the stored list", async () => {
+  const store = createStateStore();
+  const runs = createMainRuns({ store });
+  const [a, b] = await Promise.all([runs.apply(mainRun("failure", "Rust")), runs.apply(mainRun("failure", "Lint"))]);
+  await Promise.all([a.commit(), b.commit()]);
+  assert.deepStrictEqual(await store.get("state.stella-rain.core.red"), { red: ["Lint", "Rust"] });
+});
+
+test("red: other signals, main_other included, carry no red", async () => {
+  const runs = createMainRuns();
+  assert.strictEqual((await apply1(runs, mainRun("cancelled"))).event.red, undefined);
+  const pr = v2Of(ev({ event: "workflow_run", conclusion: "failure", pr: 3, branch: "claude/x" }), "main");
+  assert.strictEqual((await apply1(runs, pr)).event.red, undefined);
+});
