@@ -114,10 +114,17 @@ deleted.
 **Upgrading:** on the NAS, run `git pull`, `docker compose build` (the setup runs the image, so an
 old image runs the old setup), `docker compose run --rm setup`, then
 `docker compose up -d --force-recreate`. A local edit of `nats/nats-server.conf` is reverted with
-`git checkout nats/nats-server.conf` before the `git pull`. Each org's stream reserves 128 MiB, so
+`git checkout nats/nats-server.conf` before the `git pull`. Each org's stream GITHUB reserves 128 MiB, so
 four fit the server's 1 GB file store with room for two more. Coming from the single global stream:
 run `docker compose down`, delete `jetstream/$G/streams/GITHUB` in the `nats-data` volume (its
 events are not migrated; the dispatcher's gh sweep covers the gap), then start again.
+
+Upgrading to v2 events (stream `EVENTS`): `git pull`, `docker compose build`, then
+`docker compose up -d --force-recreate`. There are no new keys and `setup` is unchanged. The receiver
+creates `EVENTS` and its consumers (`dispatcher`, `all`) in each account at start; the new stream
+starts empty. Each org then reserves 128 MiB (`GITHUB`) plus 24 MiB (`EVENTS`), so six fit the 1 GB
+file store. Every event goes to both streams; if either publish fails the receiver answers 503, and
+the delivery can be redelivered from the App's settings (the dispatcher's gh sweep covers a lost one).
 
 Replacing a key: delete its seed file in `secrets/`, run `docker compose run --rm setup`, then
 `docker compose up -d --force-recreate`. For a reader key, also update that org's dispatcher's seed.
