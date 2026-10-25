@@ -193,7 +193,7 @@ async function run(d) {
 
     conn = await connectTwice();
     if (!conn) return;
-    if (ended) return;
+    if (ended) { await conn.close().catch(() => {}); return; } // run() has already passed its own close
 
     const subjects = await conn.streamSubjects();
     if (subjects.length !== 1 || subjects[0] !== `ev.${owner}.>`) { end(1, `BROKER-DOWN key is for another account (want ${owner})`); return; }

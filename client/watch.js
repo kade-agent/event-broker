@@ -21,7 +21,7 @@ function adapter(nc, owner, profile) {
       return (await (await jetstreamManager(nc)).streams.info("EVENTS")).config.subjects;
     },
     async pending() {
-      return (await (await getConsumer()).info(true)).num_pending;
+      return (await (await getConsumer()).info(false)).num_pending;
     },
     async next() {
       const m = await (await getConsumer()).next({ expires: PULL_MS });
@@ -43,6 +43,7 @@ async function main() {
     return e instanceof Fatal ? e.exitCode : 2;
   }
 
+  const parent = process.ppid;
   const ac = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => ac.abort());
   // A closed stdout reports through the write callback; the stream's own 'error' must not crash us.
@@ -68,7 +69,8 @@ async function main() {
     now: Date.now,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     every: (ms, fn) => { const t = setInterval(fn, ms); return () => clearInterval(t); },
-    checkParent: () => process.kill(process.ppid, 0),
+    // A parent that died hands us to init or a subreaper, so its pid is kept and the ppid compared too.
+    checkParent: () => { if (process.ppid !== parent) throw new Error("parent changed"); process.kill(parent, 0); },
   });
 }
 
