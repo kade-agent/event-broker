@@ -94,6 +94,34 @@ test("a failing v2 publish answers 503; a failing v1 publish publishes no v2", a
   } finally { await t.close(); }
 });
 
+const mainRun = (conclusion) => ({ action: "completed", repository,
+  workflow_run: { name: "Rust", conclusion, head_branch: "main", head_sha: "a", pull_requests: [] } });
+
+test("a second green run of a workflow on main is main_still_passed in v2; v1 is unchanged", async () => {
+  const s = await start();
+  try {
+    await deliver(s.base, "workflow_run", mainRun("success"), { delivery: "r1" });
+    await deliver(s.base, "workflow_run", mainRun("success"), { delivery: "r2" });
+    assert.deepStrictEqual(s.published.map((p) => p.subject), [
+      "github.stella-rain.app.branch.main.workflow_run", "ev.stella-rain.app.branch.main.main_passed",
+      "github.stella-rain.app.branch.main.workflow_run", "ev.stella-rain.app.branch.main.main_still_passed",
+    ]);
+    assert.strictEqual(s.published[3].event.signal, "main_still_passed");
+  } finally { await s.close(); }
+});
+
+test("a green run answered 503 is main_passed again when it is redelivered", async () => {
+  let down = true;
+  const seen = [];
+  const s = await start({ publish: async (subject) => { if (down && subject.startsWith("ev.")) throw new Error("nats down"); seen.push(subject); } });
+  try {
+    assert.strictEqual((await deliver(s.base, "workflow_run", mainRun("success"))).status, 503);
+    down = false;
+    assert.strictEqual((await deliver(s.base, "workflow_run", mainRun("success"))).status, 202);
+    assert.strictEqual(seen.at(-1), "ev.stella-rain.app.branch.main.main_passed");
+  } finally { await s.close(); }
+});
+
 test("a push to main is published and starts a mergeability check", async () => {
   const s = await start();
   try {

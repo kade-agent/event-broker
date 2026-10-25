@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert");
-const { signalOf, v2Of, SIGNALS } = require("../src/signals");
+const { signalOf, v2Of, SIGNALS, createMainRuns } = require("../src/signals");
 const { blank } = require("../src/normalize");
 
 const ev = (fields) => ({ ...blank("d1", "stella-rain/app"), ...fields });
@@ -50,13 +50,14 @@ test("every row of the design's signal table gets its signal", () => {
   }
 });
 
-test("the table covers every signal", () => {
-  assert.deepStrictEqual(new Set(ROWS.map(([, s]) => s)), new Set(SIGNALS));
+test("the table and createMainRuns cover every signal", () => {
+  // main_still_passed comes only from createMainRuns (design section 9, decision 16).
+  assert.deepStrictEqual(new Set([...ROWS.map(([, s]) => s), "main_still_passed"]), new Set(SIGNALS));
 });
 
-test("SIGNALS is the frozen list of 36 unique [a-z_] names", () => {
-  assert.strictEqual(SIGNALS.length, 36);
-  assert.strictEqual(new Set(SIGNALS).size, 36);
+test("SIGNALS is the frozen list of 37 unique [a-z_] names", () => {
+  assert.strictEqual(SIGNALS.length, 37);
+  assert.strictEqual(new Set(SIGNALS).size, 37);
   assert.ok(Object.isFrozen(SIGNALS));
   for (const s of SIGNALS) assert.match(s, /^[a-z_]+$/);
 });
@@ -122,4 +123,47 @@ test("every delivery normalize keeps gets a signal from SIGNALS", () => {
     const r = normalize(name, { ...payload, repository }, "d");
     assert.ok(SIGNALS.includes(r.v2.event.signal), `${name} ${payload.action}`);
   }
+});
+
+// Decision 16: main_passed only when a workflow on main turns green.
+const mainRun = (conclusion, name = "Rust", repo = "stella-rain/core") =>
+  v2Of({ ...blank("d1", repo), event: "workflow_run", action: "completed", branch: "main", conclusion,
+    check: { name, url: null } }, "main");
+const signalsOf = (runs, list) => list.map((v2) => { const r = runs.apply(v2); r.commit(); return r.v2.event.signal; });
+
+test("a workflow's first pass on main is main_passed, the next ones main_still_passed", () => {
+  const runs = createMainRuns();
+  assert.deepStrictEqual(signalsOf(runs, [mainRun("success"), mainRun("success"), mainRun("success")]),
+    ["main_passed", "main_still_passed", "main_still_passed"]);
+  const r = runs.apply(mainRun("success"));
+  assert.strictEqual(r.v2.subject, "ev.stella-rain.core.branch.main.main_still_passed");
+});
+
+test("a pass after a failure of the same workflow is main_passed again; main_other changes nothing", () => {
+  const runs = createMainRuns();
+  assert.deepStrictEqual(signalsOf(runs, [mainRun("success"), mainRun("failure"), mainRun("cancelled"),
+    mainRun("success"), mainRun("cancelled"), mainRun("success")]),
+  ["main_passed", "main_failed", "main_other", "main_passed", "main_other", "main_still_passed"]);
+});
+
+test("each workflow of each repository has its own state", () => {
+  const runs = createMainRuns();
+  assert.deepStrictEqual(signalsOf(runs, [mainRun("failure", "Rust"), mainRun("success", "Auto-merge"),
+    mainRun("success", "Auto-merge"), mainRun("success", "Rust", "stella-rain/app"), mainRun("success", "Rust")]),
+  ["main_failed", "main_passed", "main_still_passed", "main_passed", "main_passed"]);
+});
+
+test("without commit the state does not move, so a retried delivery gets the same signal", () => {
+  const runs = createMainRuns();
+  assert.strictEqual(runs.apply(mainRun("success")).v2.event.signal, "main_passed");
+  assert.strictEqual(runs.apply(mainRun("success")).v2.event.signal, "main_passed");
+});
+
+test("any other signal passes through unchanged", () => {
+  const runs = createMainRuns();
+  const v2 = v2Of(ev({ event: "workflow_run", conclusion: "success", pr: 3, branch: "claude/x" }), "main");
+  const r = runs.apply(v2);
+  r.commit();
+  assert.strictEqual(r.v2, v2);
+  assert.strictEqual(runs.apply(mainRun("success")).v2.event.signal, "main_passed");
 });
