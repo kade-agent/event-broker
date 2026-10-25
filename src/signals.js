@@ -12,7 +12,7 @@ const SIGNALS = Object.freeze([
   "pr_merged", "pr_closed", "pr_ready", "pr_draft", "automerge_on", "automerge_off",
   ...MERGE_STATES.map((s) => `merge_${s}`), "merge_other",
   "ci_failed", "ci_passed", "ci_other",
-  "main_failed", "main_passed", "main_other",
+  "main_failed", "main_passed", "main_still_passed", "main_other",
   "branch_failed", "branch_passed", "branch_other",
   "check_failed", "check_passed", "check_other",
   "review_changes", "review_comment", "review_approved", "review_dismissed", "review_other",
@@ -61,4 +61,24 @@ function v2Of(e, defaultBranch) {
   };
 }
 
-module.exports = { signalOf, v2Of, SIGNALS };
+// Decision 16: a pass on main is main_passed only when that workflow (repository and name) last
+// failed there, or has not run there since the receiver started; otherwise main_still_passed.
+// apply(v2) -> { v2, commit }: the caller commits after both publishes succeed, so a delivery
+// answered 503 gets the same signal when it is redelivered. The state is in memory, like
+// mergeable.js: after a restart each workflow's first pass is main_passed again.
+function createMainRuns() {
+  const passed = new Map(); // "owner/repo@workflow" -> true after a pass, false after a failure
+  return {
+    apply(v2) {
+      const { signal } = v2.event;
+      if (signal !== "main_passed" && signal !== "main_failed") return { v2, commit: () => {} };
+      const key = `${v2.event.repo}@${v2.event.check ? v2.event.check.name : ""}`;
+      const commit = () => passed.set(key, signal === "main_passed");
+      if (signal === "main_failed" || passed.get(key) !== true) return { v2, commit };
+      const still = "main_still_passed";
+      return { v2: { subject: v2.subject.replace(/\.main_passed$/, `.${still}`), event: { ...v2.event, signal: still } }, commit };
+    },
+  };
+}
+
+module.exports = { signalOf, v2Of, SIGNALS, createMainRuns };

@@ -7,6 +7,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const { verifySignature } = require("./verify");
 const { normalize, mergeTrigger } = require("./normalize");
+const { createMainRuns } = require("./signals");
 
 const MAX_BODY = 25 * 1024 * 1024; // GitHub caps a delivery at 25 MB
 
@@ -30,6 +31,7 @@ function send(res, status, body = "") {
 }
 
 function createReceiver({ secret, publish, onTrigger, allowedOwners, log = console.error }) {
+  const mainRuns = createMainRuns();
   const allowed = new Set(allowedOwners.map((o) => o.toLowerCase()));
   async function onDelivery(req, res) {
     let body;
@@ -51,10 +53,12 @@ function createReceiver({ secret, publish, onTrigger, allowedOwners, log = conso
       // Either publish failing answers 503 and the delivery can be redelivered from the App's
       // settings (the dispatcher's gh sweep covers a lost one); the delivery GUID as message id
       // makes each stream's duplicate window drop the copy that already got through.
+      const { v2, commit } = mainRuns.apply(out.v2);
       let ack1, ack2;
       try { ack1 = await publish(out.subject, out.event, delivery); } catch (e) { log(`publish ${out.subject}: ${e.message}`); return send(res, 503); }
-      try { ack2 = await publish(out.v2.subject, out.v2.event, delivery); } catch (e) { log(`publish ${out.v2.subject}: ${e.message}`); return send(res, 503); }
-      log(`${tag} ${ack1 && ack1.duplicate && ack2 && ack2.duplicate ? "duplicate" : "published"} ${out.subject} ${out.v2.subject}`);
+      try { ack2 = await publish(v2.subject, v2.event, delivery); } catch (e) { log(`publish ${v2.subject}: ${e.message}`); return send(res, 503); }
+      commit();
+      log(`${tag} ${ack1 && ack1.duplicate && ack2 && ack2.duplicate ? "duplicate" : "published"} ${out.subject} ${v2.subject}`);
     } else {
       log(`${tag} trigger-only`);
     }
