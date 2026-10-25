@@ -154,8 +154,10 @@ async function main() {
     accounts[owner] = { jsm, js };
     publishers[owner] = (subject, event, msgID) => js.publish(subject, JSON.stringify(event), msgID ? { msgID } : undefined);
   }
-  const publish = publisherFor(publishers);
   const state = createStateStore(stateBackend(accounts));
+  // Decision 21: every v2 event on a PR also updates that PR's snapshot in STATE.
+  const { createPrSnapshots, withSnapshots } = require("./stream");
+  const publish = withSnapshots(publisherFor(publishers), createPrSnapshots({ store: state }));
 
   if (!process.env.APP_ID) throw new Error("APP_ID is not set");
   const app = createApp({ appId: process.env.APP_ID, privateKey: fileSetting("APP_PRIVATE_KEY_FILE") });

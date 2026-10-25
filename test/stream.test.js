@@ -3,7 +3,8 @@ const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
-const { ensureStream, streamFor, eventsStreamFor, profileConsumerFor, stateStreamFor, stateKey, createStateStore } = require("../src/stream");
+const { ensureStream, streamFor, eventsStreamFor, profileConsumerFor, stateStreamFor, stateKey, createStateStore,
+  createPrSnapshots, withSnapshots } = require("../src/stream");
 
 // A jsm that records what it was asked, and knows only what was added.
 function fakeJsm({ stream = false, consumer = false } = {}) {
@@ -194,16 +195,21 @@ test("stateKey: state.<owner>.<repo>.<topic...>, owner lower-cased, every part t
   assert.strictEqual(stateKey("kade-agent/.github", "main", "Rust check"), "state.kade-agent._github.main.Rust_check");
 });
 
-test("nats-server.conf: each receiver may write state.<owner>.> and use the STATE stream API; no reader may", () => {
+test("nats-server.conf: each receiver may write state.<owner>.> and use the STATE stream API; a reader may only read it", () => {
   const conf = fs.readFileSync(path.join(__dirname, "..", "nats", "nats-server.conf"), "utf8");
   const owners = [...conf.matchAll(/^  "([a-z0-9-]+)": \{$/gm)].map((x) => x[1]);
   assert.deepStrictEqual(owners, ["kade-k8s-platform", "kade-agent", "stella-rain", "star-resonance"]);
   for (const o of owners) assert.ok(conf.includes(`"state.${o}.>"`), `receiver ${o} writes state.${o}.>`);
+  const receivers = conf.split("nkey: $RECEIVER_NKEY_").slice(1).map((b) => b.split("nkey: $READER_NKEY_")[0]);
+  assert.strictEqual(receivers.length, 4);
   for (const api of ["INFO", "CREATE", "UPDATE", "MSG.GET"]) {
-    assert.strictEqual(conf.split(`"$JS.API.STREAM.${api}.STATE"`).length - 1, 4, `four receivers have STREAM.${api}.STATE`);
+    for (const r of receivers) assert.ok(r.includes(`"$JS.API.STREAM.${api}.STATE"`), `each receiver has STREAM.${api}.STATE`);
   }
   for (const block of conf.split("nkey: $READER_NKEY_").slice(1)) {
-    assert.ok(!block.split("nkey: $RECEIVER_NKEY_")[0].includes("STATE"), "a reader has no STATE permission");
+    const reader = block.split("nkey: $RECEIVER_NKEY_")[0];
+    // Decision 21 (S3): the reader reads STATE for watch.js --state, and nothing more.
+    assert.ok(reader.includes('"$JS.API.STREAM.INFO.STATE"') && reader.includes('"$JS.API.STREAM.MSG.GET.STATE"'), "a reader reads STATE");
+    for (const no of ['"state.', "CREATE.STATE", "UPDATE.STATE"]) assert.ok(!reader.includes(no), `a reader has no ${no}`);
   }
 });
 
@@ -254,4 +260,76 @@ test("state store: with no backend it is memory only", async () => {
   assert.strictEqual(await st.get("k"), null);
   await st.put("k", { passed: true });
   assert.deepStrictEqual(await st.get("k"), { passed: true });
+});
+
+// ---- decision 21 (S3): PR snapshots ----
+
+const ev2 = (o) => ({ repo: "Stella-Rain/app", pr: 5, branch: null, sha: null, event: null, action: null, merged: null,
+  draft: null, auto_merge: null, conclusion: null, check: null, mergeable_state: null, issue: null, label: null,
+  state_reason: null, comment: null, delivery: "d", v: 2, signal: null, ...o });
+const snapshots = (store = createStateStore()) => {
+  let t = 0;
+  return { store, s: createPrSnapshots({ store, now: () => `2026-10-25T00:00:0${t++}Z` }) };
+};
+const KEY = "state.stella-rain.app.pr.5";
+
+test("snapshot: a PR event fills what it knows; unknown fields are null", async () => {
+  const { store, s } = snapshots();
+  await s.update(ev2({ event: "pull_request", signal: "automerge_on", branch: "claude/x", sha: "abc", draft: false, auto_merge: true }));
+  assert.deepStrictEqual(await store.get(KEY), { repo: "Stella-Rain/app", pr: 5, branch: "claude/x", sha: "abc", state: "open",
+    draft: false, auto_merge: true, mergeable_state: null, checks: {}, review: null, last_comment: null, updated_at: "2026-10-25T00:00:00Z" });
+});
+
+test("snapshot: mergeable, checks, review, comment, merge; a new sha empties checks", async () => {
+  const { store, s } = snapshots();
+  await s.update(ev2({ event: "mergeable", signal: "merge_behind", sha: "abc", branch: "claude/x", mergeable_state: "behind", draft: false, auto_merge: false }));
+  await s.update(ev2({ event: "workflow_run", signal: "ci_failed", sha: "abc", check: { name: "test", url: "u" }, conclusion: "failure" }));
+  await s.update(ev2({ event: "check_run", signal: "check_passed", sha: "abc", check: { name: "lint", url: null }, conclusion: "success" }));
+  assert.deepStrictEqual((await store.get(KEY)).checks, { test: "failure", lint: "success" });
+  await s.update(ev2({ event: "workflow_run", signal: "ci_passed", sha: "def", check: { name: "test", url: "u" }, conclusion: "success" }));
+  await s.update(ev2({ event: "pull_request_review", signal: "review_changes", conclusion: "CHANGES_REQUESTED", sha: "def" }));
+  await s.update(ev2({ event: "issue_comment", signal: "pr_comment", comment: { id: 1, author: "enjay27", url: "c" } }));
+  await s.update(ev2({ event: "pull_request", signal: "pr_merged", action: "closed", merged: true, sha: "def", draft: false, auto_merge: true }));
+  const snap = await store.get(KEY);
+  assert.deepStrictEqual(snap.checks, { test: "success" });
+  assert.strictEqual(snap.sha, "def");
+  assert.strictEqual(snap.mergeable_state, "behind");
+  assert.strictEqual(snap.review, "changes_requested");
+  assert.deepStrictEqual(snap.last_comment, { author: "enjay27", url: "c" });
+  assert.strictEqual(snap.state, "merged");
+  assert.strictEqual(snap.updated_at, "2026-10-25T00:00:06Z");
+});
+
+test("snapshot: pr_closed is closed, a later reopen-type event is open again", async () => {
+  const { store, s } = snapshots();
+  await s.update(ev2({ event: "pull_request", signal: "pr_closed", action: "closed", merged: false }));
+  assert.strictEqual((await store.get(KEY)).state, "closed");
+  await s.update(ev2({ event: "pull_request", signal: "pr_ready", action: "ready_for_review", draft: false }));
+  assert.strictEqual((await store.get(KEY)).state, "open");
+});
+
+test("snapshot: events without a PR are left alone; updates to one PR run one at a time", async () => {
+  const { store, s } = snapshots();
+  await s.update(ev2({ pr: null, event: "workflow_run", signal: "main_failed", branch: "main" }));
+  assert.strictEqual(await store.get("state.stella-rain.app.pr.null"), null);
+  await Promise.all([
+    s.update(ev2({ event: "check_run", signal: "check_passed", sha: "abc", check: { name: "a", url: null }, conclusion: "success" })),
+    s.update(ev2({ event: "check_run", signal: "check_passed", sha: "abc", check: { name: "b", url: null }, conclusion: "success" })),
+  ]);
+  assert.deepStrictEqual((await store.get(KEY)).checks, { a: "success", b: "success" });
+});
+
+test("withSnapshots: a v2 PR event updates its snapshot after it is published; v1 and failed publishes do not", async () => {
+  const { store, s } = snapshots();
+  const sent = [];
+  let fail = false;
+  const publish = withSnapshots(async (subject) => { if (fail) throw new Error("nats down"); sent.push(subject); return { duplicate: false } }, s);
+  const e = ev2({ event: "pull_request", signal: "pr_merged", merged: true });
+  await publish("github.stella-rain.app.pr.5.pull_request", e, "d");
+  assert.strictEqual(await store.get(KEY), null);
+  assert.deepStrictEqual(await publish("ev.stella-rain.app.pr.5.pr_merged", e, "d"), { duplicate: false });
+  assert.strictEqual((await store.get(KEY)).state, "merged");
+  fail = true;
+  await assert.rejects(publish("ev.stella-rain.app.pr.6.pr_merged", { ...e, pr: 6 }, "d"), /nats down/);
+  assert.strictEqual(await store.get("state.stella-rain.app.pr.6"), null);
 });

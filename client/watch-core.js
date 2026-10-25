@@ -13,15 +13,16 @@ class Fatal extends Error {
 }
 
 function parseArgs(argv) {
-  const out = { owner: undefined, profile: undefined, json: false, window: 30 };
+  const out = { owner: undefined, profile: undefined, json: false, window: 30, state: undefined };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") out.json = true;
-    else if (a === "--owner" || a === "--profile" || a === "--window") {
+    else if (a === "--owner" || a === "--profile" || a === "--window" || a === "--state") {
       if (i + 1 >= argv.length) throw new Fatal(`${a} needs a value`, 2);
       out[a.slice(2)] = argv[++i];
     } else throw new Fatal(`unknown argument ${a}`, 2);
   }
+  if (out.state !== undefined && !/^[^/\s]+\/[^/\s]+$/.test(out.state)) throw new Fatal("--state needs <owner>/<repo>", 2);
   if (typeof out.window === "string") {
     if (!/^\d+$/.test(out.window)) throw new Fatal("--window needs a whole number of seconds", 2);
     out.window = Number(out.window);
@@ -62,6 +63,10 @@ function resolveSettings({ argv, env, home, fs, platform }) {
   const owner = (args.owner || get("EVENT_BROKER_OWNER") || "").toLowerCase();
   if (!owner) throw new Fatal("no owner: pass --owner <org> or set EVENT_BROKER_OWNER", 2);
 
+  if (args.state && args.state.split("/")[0].toLowerCase() !== owner) {
+    throw new Fatal(`--state ${args.state} is not in ${owner}'s account`, 2);
+  }
+
   const keyFile = get("EVENT_BROKER_NKEY_FILE") || path.join(dir, `${owner}.nk`);
   const existing = readOrNull(fs, keyFile);
   if (existing === null || !existing.trim()) {
@@ -77,7 +82,7 @@ function resolveSettings({ argv, env, home, fs, platform }) {
   }
 
   return {
-    owner, url, keyFile, json: args.json, window: args.window,
+    owner, url, keyFile, json: args.json, window: args.window, state: args.state,
     profile: args.profile || "dispatcher",
     pidFile: get("WATCH_PIDFILE") || path.join(dir, `watch-${owner}.pid`),
   };
@@ -121,6 +126,24 @@ function formatSummary(events, json) {
   }
   const entries = [...groups.values()].map((g) => formatLine(g.last, false) + (g.count > 1 ? ` count=${g.count}` : ""));
   return [`SUMMARY ${events.length} event${events.length === 1 ? "" : "s"}`, ...entries].join(" | ");
+}
+
+// Decision 21 (S3): watch.js --state's lines. The red line, then one line per PR snapshot by number,
+// null fields left out and values quoted as in an entry. --json: one object.
+function formatState({ repo, red, prs }, json) {
+  const sorted = [...prs].sort((a, b) => a.pr - b.pr);
+  if (json) return [JSON.stringify({ repo, red, prs: sorted })];
+  const line = (s) => {
+    const checks = Object.entries(s.checks || {}).map(([k, v]) => `${k}:${v}`).join(",");
+    const fields = [
+      ["state", s.state], ["branch", s.branch], ["sha", s.sha ? String(s.sha).slice(0, 7) : null],
+      ["mergeable", s.mergeable_state], ["checks", checks || null], ["review", s.review],
+      ["draft", s.draft], ["auto_merge", s.auto_merge], ["last_comment", s.last_comment && s.last_comment.author],
+      ["updated_at", s.updated_at],
+    ];
+    return [`pr ${s.repo}#${s.pr}`, ...fields.filter(([, v]) => v != null && v !== "").map(([k, v]) => `${k}=${quote(String(v))}`)].join(" ");
+  };
+  return [`STATE ${repo} red=${red.length ? quote(red.join(",")) : "-"}`, ...sorted.map(line)];
 }
 
 const SEEN_MAX = 1000; // stream sequences remembered, to ack a redelivery without printing it again
@@ -283,4 +306,4 @@ async function run(d) {
   return code;
 }
 
-module.exports = { Fatal, parseArgs, parseEnvFile, resolveSettings, formatLine, formatSummary, run };
+module.exports = { Fatal, parseArgs, parseEnvFile, resolveSettings, formatLine, formatSummary, formatState, run };

@@ -2,7 +2,7 @@
 // client/watch-core.js with every effect injected: no network, no real files, no real clock.
 const test = require("node:test");
 const assert = require("node:assert");
-const { resolveSettings, parseArgs, parseEnvFile, formatLine, run, Fatal } = require("../client/watch-core");
+const { resolveSettings, parseArgs, parseEnvFile, formatLine, run, Fatal, formatState } = require("../client/watch-core");
 
 const HOME = "/home/u";
 const BROKER_ENV = `${HOME}/.claude/dispatcher/broker.env`;
@@ -25,8 +25,11 @@ const resolve = (over = {}) => resolveSettings({ argv: ["--owner", "kade-agent"]
 const fatal = (code, re) => (e) => e instanceof Fatal && e.exitCode === code && re.test(e.message);
 
 test("arguments: --owner, --profile, --json and --window", () => {
-  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0 });
-  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30 });
+  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0, state: undefined });
+  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30, state: undefined });
+  assert.strictEqual(parseArgs(["--state", "kade-agent/x"]).state, "kade-agent/x");
+  assert.throws(() => parseArgs(["--state"]), fatal(2, /--state/));
+  assert.throws(() => parseArgs(["--state", "no-slash"]), fatal(2, /--state/));
   assert.throws(() => parseArgs(["--window", "x"]), fatal(2, /--window/));
   assert.throws(() => parseArgs(["--window", "-1"]), fatal(2, /--window/));
   assert.throws(() => parseArgs(["--window"]), fatal(2, /--window/));
@@ -525,4 +528,30 @@ test("line: red= on a main event, names joined by a comma, - when none; a name w
   assert.strictEqual(formatLine(m("main_passed", []), false), "main_passed a/b@main check=Rust red=- delivery=D1");
   assert.strictEqual(formatLine(m("main_failed", ["Rust check"]), false), 'main_failed a/b@main check=Rust red="Rust check" delivery=D1');
   assert.strictEqual(formatLine(msg({ signal: "pr_merged", repo: "a/b", pr: 1, delivery: "D1" }), false), "pr_merged a/b#1 delivery=D1");
+});
+
+// ---- decision 21 (S3): --state ----
+
+test("settings: --state is carried; its owner must be --owner's (exit 2)", () => {
+  assert.strictEqual(resolve({ argv: ["--owner", "kade-agent", "--state", "Kade-Agent/x"] }).state, "Kade-Agent/x");
+  assert.throws(() => resolve({ argv: ["--owner", "kade-agent", "--state", "stella-rain/x"] }), fatal(2, /--state/));
+});
+
+test("state lines: the red line, then one line per PR by number, null fields left out", () => {
+  const snap = (pr, o) => ({ repo: "kade-agent/x", pr, branch: null, sha: null, state: "open", draft: null, auto_merge: null,
+    mergeable_state: null, checks: {}, review: null, last_comment: null, updated_at: "T", ...o });
+  const prs = [snap(9, { state: "merged" }), snap(3, { branch: "claude/y", sha: "abcdef12345", mergeable_state: "behind",
+    checks: { test: "failure", "lint check": "success" }, review: "approved", draft: false, auto_merge: true,
+    last_comment: { author: "enjay27", url: "u" } })];
+  assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: ["Rust"], prs }, false), [
+    "STATE kade-agent/x red=Rust",
+    'pr kade-agent/x#3 state=open branch=claude/y sha=abcdef1 mergeable=behind checks="test:failure,lint check:success" review=approved draft=false auto_merge=true last_comment=enjay27 updated_at=T',
+    "pr kade-agent/x#9 state=merged updated_at=T",
+  ]);
+  assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: [], prs: [] }, false), ["STATE kade-agent/x red=-"]);
+});
+
+test("state lines: --json is one object, PRs by number", () => {
+  const prs = [{ pr: 9 }, { pr: 3 }];
+  assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true)[0]), { repo: "kade-agent/x", red: [], prs: [{ pr: 3 }, { pr: 9 }] });
 });
