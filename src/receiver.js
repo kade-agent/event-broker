@@ -8,6 +8,7 @@ const fs = require("node:fs");
 const { verifySignature } = require("./verify");
 const { normalize, mergeTrigger } = require("./normalize");
 const { createMainRuns } = require("./signals");
+const { createStateStore } = require("./stream");
 
 const MAX_BODY = 25 * 1024 * 1024; // GitHub caps a delivery at 25 MB
 
@@ -30,8 +31,9 @@ function send(res, status, body = "") {
   res.end(typeof body === "string" ? body : JSON.stringify(body));
 }
 
-function createReceiver({ secret, publish, onTrigger, allowedOwners, log = console.error }) {
-  const mainRuns = createMainRuns();
+// state: the STATE store (decision 19); memory only when not given.
+function createReceiver({ secret, publish, onTrigger, allowedOwners, state = createStateStore(), log = console.error }) {
+  const mainRuns = createMainRuns({ store: state });
   const allowed = new Set(allowedOwners.map((o) => o.toLowerCase()));
   async function onDelivery(req, res) {
     let body;
@@ -53,13 +55,13 @@ function createReceiver({ secret, publish, onTrigger, allowedOwners, log = conso
       // Either publish failing answers 503 and the delivery can be redelivered from the App's
       // settings (the dispatcher's gh sweep covers a lost one); the delivery GUID as message id
       // makes each stream's duplicate window drop the copy that already got through.
-      const { v2, commit } = mainRuns.apply(out.v2);
+      const { v2, commit } = await mainRuns.apply(out.v2);
       let ack1, ack2;
       if (out.subject) {
         try { ack1 = await publish(out.subject, out.event, delivery); } catch (e) { log(`publish ${out.subject}: ${e.message}`); return send(res, 503); }
       }
       try { ack2 = await publish(v2.subject, v2.event, delivery); } catch (e) { log(`publish ${v2.subject}: ${e.message}`); return send(res, 503); }
-      commit();
+      await commit();
       const duplicate = (!out.subject || (ack1 && ack1.duplicate)) && ack2 && ack2.duplicate;
       log(`${tag} ${duplicate ? "duplicate" : "published"} ${out.subject || "-"} ${v2.subject}`);
     } else {
@@ -104,6 +106,28 @@ function publisherFor(publishers) {
   };
 }
 
+// read/write of the STATE store through the account the key names (state.<owner>.…). A subject with
+// no message yet is null, not an error.
+function stateBackend(accounts) {
+  const of = (key) => {
+    const owner = key.split(".")[1];
+    if (!accounts[owner]) throw new Error(`no receiver connection for ${owner}`);
+    return accounts[owner];
+  };
+  return {
+    async read(key) {
+      try {
+        const m = await of(key).jsm.streams.getMessage("STATE", { last_by_subj: key });
+        return m ? m.json() : null;
+      } catch (e) {
+        if (e.code === 404 || e.code === "404" || /no message found|not found/i.test(e.message)) return null;
+        throw e;
+      }
+    },
+    async write(key, value) { await of(key).js.publish(key, JSON.stringify(value)); },
+  };
+}
+
 async function main() {
   const allowedOwners = (process.env.ALLOWED_OWNERS || "").split(",").map((o) => o.trim()).filter(Boolean);
   if (!allowedOwners.length) throw new Error("ALLOWED_OWNERS is not set");
@@ -116,6 +140,7 @@ async function main() {
   // One connection per owner: each is a user of that owner's account, which holds its stream.
   const seeds = parseSeeds(fileSetting("NATS_NKEY_SEEDS_FILE"));
   const publishers = {};
+  const accounts = {}; // owner -> { jsm, js }, for the STATE store
   for (const owner of allowedOwners.map((o) => o.toLowerCase())) {
     if (!seeds[owner]) throw new Error(`no receiver seed for ${owner}`);
     const nc = await connect({
@@ -123,16 +148,19 @@ async function main() {
       authenticator: nkeyAuthenticator(new TextEncoder().encode(seeds[owner])),
       maxReconnectAttempts: -1,
     });
-    await ensureStream(await jetstreamManager(nc), owner);
+    const jsm = await jetstreamManager(nc);
+    await ensureStream(jsm, owner);
     const js = jetstream(nc);
+    accounts[owner] = { jsm, js };
     publishers[owner] = (subject, event, msgID) => js.publish(subject, JSON.stringify(event), msgID ? { msgID } : undefined);
   }
   const publish = publisherFor(publishers);
+  const state = createStateStore(stateBackend(accounts));
 
   if (!process.env.APP_ID) throw new Error("APP_ID is not set");
   const app = createApp({ appId: process.env.APP_ID, privateKey: fileSetting("APP_PRIVATE_KEY_FILE") });
-  const watch = createMergeWatch({ gh: app, publish });
-  const server = createReceiver({ secret: fileSetting("WEBHOOK_SECRET_FILE"), allowedOwners, publish, onTrigger: (t) => watch.handle(t) });
+  const watch = createMergeWatch({ gh: app, publish, store: state });
+  const server = createReceiver({ secret: fileSetting("WEBHOOK_SECRET_FILE"), allowedOwners, publish, state, onTrigger: (t) => watch.handle(t) });
   const port = Number(process.env.PORT || 8787);
   server.listen(port, () => console.log(`event-broker receiver on ${port}`));
 }
