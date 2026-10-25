@@ -145,3 +145,12 @@ test("decision 19: a failed publish writes no state, so the next check publishes
   assert.deepStrictEqual(errors, ["nats down"]);
   assert.strictEqual(await store.get("state.stella-rain.app.pr.5.mergeable"), null);
 });
+
+test("decision 22: every PR read is handed to the snapshots, changed state or not", async () => {
+  const repaired = [];
+  const snapshots = { repair: async (repo, pr) => { repaired.push([repo, pr.number, pr.mergeable_state]); } };
+  const { w } = watch(fakeGh({ 5: ["dirty"] }), { snapshots, log: () => {} });
+  await w.handle({ repo: "stella-rain/app", pr: 5 });
+  await w.handle({ repo: "stella-rain/app", pr: 5 });
+  assert.deepStrictEqual(repaired, [["stella-rain/app", 5, "dirty"], ["stella-rain/app", 5, "dirty"]]);
+});

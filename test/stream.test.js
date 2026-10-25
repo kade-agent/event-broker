@@ -286,6 +286,8 @@ test("snapshot: mergeable, checks, review, comment, merge; a new sha empties che
   await s.update(ev2({ event: "workflow_run", signal: "ci_failed", sha: "abc", check: { name: "test", url: "u" }, conclusion: "failure" }));
   await s.update(ev2({ event: "check_run", signal: "check_passed", sha: "abc", check: { name: "lint", url: null }, conclusion: "success" }));
   assert.deepStrictEqual((await store.get(KEY)).checks, { test: "failure", lint: "success" });
+  // Decision 22: a PR-level event moves the head; checks then count for the new head only.
+  await s.update(ev2({ event: "pull_request", signal: "automerge_on", sha: "def", draft: false, auto_merge: true }));
   await s.update(ev2({ event: "workflow_run", signal: "ci_passed", sha: "def", check: { name: "test", url: "u" }, conclusion: "success" }));
   await s.update(ev2({ event: "pull_request_review", signal: "review_changes", conclusion: "CHANGES_REQUESTED", sha: "def" }));
   await s.update(ev2({ event: "issue_comment", signal: "pr_comment", comment: { id: 1, author: "enjay27", url: "c" } }));
@@ -297,7 +299,7 @@ test("snapshot: mergeable, checks, review, comment, merge; a new sha empties che
   assert.strictEqual(snap.review, "changes_requested");
   assert.deepStrictEqual(snap.last_comment, { author: "enjay27", url: "c" });
   assert.strictEqual(snap.state, "merged");
-  assert.strictEqual(snap.updated_at, "2026-10-25T00:00:06Z");
+  assert.strictEqual(snap.updated_at, "2026-10-25T00:00:07Z");
 });
 
 test("snapshot: pr_closed is closed, a later reopen-type event is open again", async () => {
@@ -332,4 +334,52 @@ test("withSnapshots: a v2 PR event updates its snapshot after it is published; v
   fail = true;
   await assert.rejects(publish("ev.stella-rain.app.pr.6.pr_merged", { ...e, pr: 6 }, "d"), /nats down/);
   assert.strictEqual(await store.get("state.stella-rain.app.pr.6"), null);
+});
+
+// ---- decision 22: the snapshot's head is the PR's ----
+
+test("head: a check sets sha only while it is null; a check for another sha is ignored", async () => {
+  const { store, s } = snapshots();
+  await s.update(ev2({ event: "check_run", signal: "check_failed", sha: "abc", check: { name: "t", url: null }, conclusion: "failure" }));
+  assert.strictEqual((await store.get(KEY)).sha, "abc");
+  await s.update(ev2({ event: "workflow_run", signal: "ci_passed", sha: "old", check: { name: "t", url: null }, conclusion: "success" }));
+  const snap = await store.get(KEY);
+  assert.strictEqual(snap.sha, "abc");
+  assert.deepStrictEqual(snap.checks, { t: "failure" });
+});
+
+test("head: a push_branch to the snapshot's branch moves its sha and empties checks; another branch does nothing", async () => {
+  const { store, s } = snapshots();
+  await s.update(ev2({ event: "mergeable", signal: "merge_clean", sha: "abc", branch: "claude/x", mergeable_state: "clean" }));
+  await s.update(ev2({ event: "check_run", signal: "check_passed", sha: "abc", check: { name: "t", url: null }, conclusion: "success" }));
+  assert.deepStrictEqual(await store.get("state.stella-rain.app.branch.claude/x"), { pr: 5 });
+  await s.update(ev2({ pr: null, event: "push", signal: "push_branch", branch: "claude/other", sha: "zzz" }));
+  await s.update(ev2({ pr: null, event: "push", signal: "push_branch", branch: "claude/x", sha: "def" }));
+  const snap = await store.get(KEY);
+  assert.strictEqual(snap.sha, "def");
+  assert.deepStrictEqual(snap.checks, {});
+  assert.strictEqual(await store.get("state.stella-rain.app.pr.null"), null);
+});
+
+test("repair: a PR read from GitHub is written into its snapshot", async () => {
+  const { store, s } = snapshots();
+  await s.update(ev2({ event: "check_run", signal: "check_passed", sha: "old", check: { name: "t", url: null }, conclusion: "success" }));
+  await s.repair("Stella-Rain/app", { number: 5, head: { ref: "claude/x", sha: "new" }, draft: false, auto_merge: { merge_method: "merge" },
+    merged: false, state: "open", mergeable_state: "blocked" });
+  const snap = await store.get(KEY);
+  assert.deepStrictEqual({ sha: snap.sha, branch: snap.branch, draft: snap.draft, auto_merge: snap.auto_merge, state: snap.state,
+    mergeable_state: snap.mergeable_state, checks: snap.checks }, { sha: "new", branch: "claude/x", draft: false, auto_merge: true,
+    state: "open", mergeable_state: "blocked", checks: {} });
+  await s.repair("Stella-Rain/app", { number: 5, head: { ref: "claude/x", sha: "new" }, draft: false, auto_merge: null, merged: true, state: "closed", mergeable_state: "unknown" });
+  assert.strictEqual((await store.get(KEY)).state, "merged");
+  await s.repair("Stella-Rain/app", { number: 6, head: { ref: "claude/y", sha: "s" }, draft: true, auto_merge: null, merged: false, state: "closed", mergeable_state: "dirty" });
+  assert.strictEqual((await store.get("state.stella-rain.app.pr.6")).state, "closed");
+});
+
+test("withSnapshots: a published push_branch reaches the snapshots too", async () => {
+  const { store, s } = snapshots();
+  await s.update(ev2({ event: "mergeable", signal: "merge_clean", sha: "abc", branch: "claude/x", mergeable_state: "clean" }));
+  const publish = withSnapshots(async () => ({}), s);
+  await publish("ev.stella-rain.app.branch.claude/x.push_branch", ev2({ pr: null, event: "push", signal: "push_branch", branch: "claude/x", sha: "def" }), "d");
+  assert.strictEqual((await store.get(KEY)).sha, "def");
 });
