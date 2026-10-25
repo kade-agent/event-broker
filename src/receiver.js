@@ -1,7 +1,7 @@
 "use strict";
 // POST /github  an App webhook delivery: signature checked, normalized, published to JetStream with
-//               the delivery GUID as the message id, as v1 (github.*) and v2 (ev.*); a push or
-//               PR update also starts a mergeability check.
+//               the delivery GUID as the message id, as v1 (github.*) and v2 (ev.*), a task branch
+//               push as v2 only; a push to main or a PR update also starts a mergeability check.
 // GET  /healthz liveness for the NAS.
 const http = require("node:http");
 const fs = require("node:fs");
@@ -55,10 +55,13 @@ function createReceiver({ secret, publish, onTrigger, allowedOwners, log = conso
       // makes each stream's duplicate window drop the copy that already got through.
       const { v2, commit } = mainRuns.apply(out.v2);
       let ack1, ack2;
-      try { ack1 = await publish(out.subject, out.event, delivery); } catch (e) { log(`publish ${out.subject}: ${e.message}`); return send(res, 503); }
+      if (out.subject) {
+        try { ack1 = await publish(out.subject, out.event, delivery); } catch (e) { log(`publish ${out.subject}: ${e.message}`); return send(res, 503); }
+      }
       try { ack2 = await publish(v2.subject, v2.event, delivery); } catch (e) { log(`publish ${v2.subject}: ${e.message}`); return send(res, 503); }
       commit();
-      log(`${tag} ${ack1 && ack1.duplicate && ack2 && ack2.duplicate ? "duplicate" : "published"} ${out.subject} ${v2.subject}`);
+      const duplicate = (!out.subject || (ack1 && ack1.duplicate)) && ack2 && ack2.duplicate;
+      log(`${tag} ${duplicate ? "duplicate" : "published"} ${out.subject || "-"} ${v2.subject}`);
     } else {
       log(`${tag} trigger-only`);
     }

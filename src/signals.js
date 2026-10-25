@@ -18,7 +18,7 @@ const SIGNALS = Object.freeze([
   "review_changes", "review_comment", "review_approved", "review_dismissed", "review_other",
   "issue_closed", "issue_reopened", "issue_labeled",
   "pr_comment", "issue_comment",
-  "push_main",
+  "push_main", "push_branch",
 ]);
 
 const outcome = (conclusion) => (FAILED.has(conclusion) ? "failed" : conclusion === "success" ? "passed" : "other");
@@ -45,7 +45,7 @@ function signalOf(e, defaultBranch) {
     case "issue_comment":
       return e.pr != null ? "pr_comment" : "issue_comment";
     case "push":
-      return "push_main";
+      return e.branch === defaultBranch ? "push_main" : "push_branch";
     default:
       return undefined;
   }

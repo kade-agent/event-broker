@@ -67,13 +67,27 @@ test("a submitted review carries its state as the conclusion", () => {
   assert.strictEqual(r.event.conclusion, "changes_requested");
 });
 
-test("a push counts only on the default branch", () => {
+test("a push counts on the default branch and on task branches (decision 18)", () => {
   assert.deepStrictEqual(v1(normalize("push", { ref: "refs/heads/main", after: "def", repository }, D)), {
     subject: "github.stella-rain.app.push.main",
     event: { ...blank, branch: "main", event: "push", sha: "def" },
   });
-  assert.strictEqual(normalize("push", { ref: "refs/heads/claude/x", after: "def", repository }, D), null);
+  assert.strictEqual(normalize("push", { ref: "refs/heads/feature/x", after: "def", repository }, D), null);
+  assert.strictEqual(normalize("push", { ref: "refs/heads/dependabot/npm/x", after: "def", repository }, D), null);
   assert.strictEqual(normalize("push", { ref: "refs/tags/v1", after: "def", repository }, D), null);
+});
+
+test("a push to a task branch is v2 only: no v1 subject, push_branch with the pushed head", () => {
+  for (const branch of ["claude/z3-orbs", "agent/x"]) {
+    const r = normalize("push", { ref: `refs/heads/${branch}`, after: "abc1234", repository }, D);
+    assert.strictEqual(r.subject, null);
+    assert.strictEqual(r.v2.subject, `ev.stella-rain.app.branch.${branch}.push_branch`);
+    assert.deepStrictEqual(r.v2.event, { ...blank, branch, event: "push", sha: "abc1234", v: 2, signal: "push_branch" });
+  }
+});
+
+test("a task branch deletion (after a merge) is dropped", () => {
+  assert.strictEqual(normalize("push", { ref: "refs/heads/claude/x", after: "0".repeat(40), deleted: true, repository }, D), null);
 });
 
 test("subject tokens never hold a dot, a wildcard or a space", () => {

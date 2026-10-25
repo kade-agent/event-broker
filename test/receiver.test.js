@@ -132,6 +132,17 @@ test("a push to main is published and starts a mergeability check", async () => 
   } finally { await s.close(); }
 });
 
+test("a push to a task branch publishes v2 only, starts no check, logs one line", async () => {
+  const s = await start();
+  try {
+    const res = await deliver(s.base, "push", { ref: "refs/heads/claude/x", after: "d", repository });
+    assert.strictEqual(res.status, 202);
+    assert.deepStrictEqual(s.published.map((p) => p.subject), ["ev.stella-rain.app.branch.claude/x.push_branch"]);
+    assert.deepStrictEqual(s.triggers, []);
+    assert.deepStrictEqual(s.logs, ["guid-1 push -> published - ev.stella-rain.app.branch.claude/x.push_branch"]);
+  } finally { await s.close(); }
+});
+
 test("a synchronize is not published but starts a check, answered 202", async () => {
   const s = await start();
   try {
