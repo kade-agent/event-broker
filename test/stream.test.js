@@ -20,6 +20,7 @@ function fakeJsm({ stream = false, consumer = false } = {}) {
       info: async () => { if (!consumer) throw missing(); return {}; },
       add: async (stream, cfg) => { calls.push(["consumers.add", stream, cfg]); },
       update: async (stream, durable, cfg) => { calls.push(["consumers.update", stream, durable, cfg]); },
+      list: () => ({ [Symbol.asyncIterator]: async function* () {} }),
     },
   };
 }
@@ -102,6 +103,15 @@ test("a consumer on EVENTS that is not in the table is left alone and logged", a
   await ensureStream(jsm, "stella-rain", (m) => logs.push(m));
   assert.ok(logs.some((m) => /stray/.test(m)));
   assert.ok(!jsm.calls.some((c) => c.includes("stray")));
+});
+
+test("a failing consumer listing only logs: it cannot stop the receiver from starting", async () => {
+  const jsm = fakeJsm();
+  jsm.consumers.list = () => { throw new Error("permissions violation"); };
+  const logs = [];
+  await ensureStream(jsm, "stella-rain", (m) => logs.push(m));
+  assert.strictEqual(jsm.calls.filter((c) => c[0] === "consumers.add").length, 3);
+  assert.ok(logs.some((m) => /permissions violation/.test(m)));
 });
 
 test("EVENTS: ev.<owner>.> on file storage, 7 days, 24 MiB, discard old, 120 s duplicate window", () => {

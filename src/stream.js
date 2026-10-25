@@ -81,11 +81,12 @@ async function ensureStream(jsm, owner, log = console.error) {
   await upsertConsumer(stream.name, consumerFor(o));
   await upsertStream(events);
   for (const name of Object.keys(PROFILES)) await upsertConsumer(events.name, profileConsumerFor(o, name));
-  if (jsm.consumers.list) {
+  // Informational only: a failed listing must not stop the receiver from starting.
+  try {
     for await (const c of jsm.consumers.list(events.name)) {
       if (!(c.name in PROFILES)) log(`${events.name}: consumer ${c.name} is not in the profile table, left alone`);
     }
-  }
+  } catch (e) { log(`${events.name}: consumer list failed: ${e.message}`); }
 }
 
 module.exports = { ensureStream, streamFor, consumerFor, eventsStreamFor, profileConsumerFor };
