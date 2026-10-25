@@ -1,6 +1,6 @@
 "use strict";
-// Streams GITHUB (v1) and EVENTS (v2) with their durable consumers in one owner's account (design
-// sections 6 and 9),
+// Streams GITHUB (v1) and EVENTS (v2) with their durable consumers, and STATE (decision 19), in one
+// owner's account (design sections 6 and 9),
 // created or updated when the receiver starts. Every account has the same names; the owner is in
 // the subjects.
 const { AckPolicy, DeliverPolicy, DiscardPolicy, StorageType } = require("@nats-io/jetstream");
@@ -61,6 +61,43 @@ const profileConsumerFor = (owner, name) => {
   };
 };
 
+// Decision 19 (S1): the receiver's state, one message per subject, keyed by stateKey().
+const stateStreamFor = (owner) => ({
+  name: "STATE",
+  subjects: [`state.${owner}.>`],
+  storage: StorageType.File,
+  max_msgs_per_subject: 1,
+  max_age: 30 * 24 * 3600 * SECOND,
+  max_bytes: 4 * 1024 * 1024,
+  discard: DiscardPolicy.Old,
+});
+
+// state.<owner>.<repo>.<topic...>: the owner lower-cased (it picks the account), every part token-safe.
+const stateKey = (repo, ...topic) => {
+  const [owner, name] = String(repo).split("/");
+  return ["state", token(owner.toLowerCase()), token(name), ...topic.map((t) => token(t))].join(".");
+};
+
+// get(key) -> value | null and put(key, value) over read/write of the STATE stream, with memory in
+// front. A failed read is null (unknown: at worst one repeated event) and a failed write keeps the
+// value in memory; both are logged. With no read/write it is memory only (tests, and the default).
+function createStateStore({ read = async () => null, write = async () => {}, log = console.error } = {}) {
+  const mem = new Map();
+  return {
+    async get(key) {
+      if (mem.has(key)) return mem.get(key);
+      let value = null;
+      try { value = await read(key); } catch (e) { log(`state read ${key}: ${e.message}`); return null; }
+      if (value != null) mem.set(key, value);
+      return value ?? null;
+    },
+    async put(key, value) {
+      mem.set(key, value);
+      try { await write(key, value); } catch (e) { log(`state write ${key}: ${e.message}`); }
+    },
+  };
+}
+
 const notFound = (e) => /not found/i.test(e && e.message);
 const exists = (p) => p.then(() => true, (e) => { if (notFound(e)) return false; throw e; });
 
@@ -81,6 +118,7 @@ async function ensureStream(jsm, owner, log = console.error) {
   await upsertConsumer(stream.name, consumerFor(o));
   await upsertStream(events);
   for (const name of Object.keys(PROFILES)) await upsertConsumer(events.name, profileConsumerFor(o, name));
+  await upsertStream(stateStreamFor(o));
   // Informational only: a failed listing must not stop the receiver from starting.
   try {
     for await (const c of jsm.consumers.list(events.name)) {
@@ -89,4 +127,4 @@ async function ensureStream(jsm, owner, log = console.error) {
   } catch (e) { log(`${events.name}: consumer list failed: ${e.message}`); }
 }
 
-module.exports = { ensureStream, streamFor, consumerFor, eventsStreamFor, profileConsumerFor };
+module.exports = { ensureStream, streamFor, consumerFor, eventsStreamFor, profileConsumerFor, stateStreamFor, stateKey, createStateStore };

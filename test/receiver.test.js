@@ -8,7 +8,7 @@ const secret = "hook-secret";
 const repository = { full_name: "stella-rain/app", default_branch: "main", owner: { login: "stella-rain" } };
 const pr = { number: 7, merged: true, draft: false, auto_merge: null, head: { ref: "claude/t", sha: "s" } };
 
-async function start({ publish, onTrigger = () => {} } = {}) {
+async function start({ publish, onTrigger = () => {}, state } = {}) {
   const published = [];
   const triggers = [];
   const logs = [];
@@ -18,6 +18,7 @@ async function start({ publish, onTrigger = () => {} } = {}) {
     onTrigger: (t) => { triggers.push(t); onTrigger(t); },
     log: (line) => logs.push(line),
     allowedOwners: ["stella-rain"],
+    state,
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -108,6 +109,19 @@ test("a second green run of a workflow on main is main_still_passed in v2; v1 is
     ]);
     assert.strictEqual(s.published[3].event.signal, "main_still_passed");
   } finally { await s.close(); }
+});
+
+test("decision 19: a restarted receiver with the same state store remembers a green workflow", async () => {
+  const { createStateStore } = require("../src/stream");
+  const values = {};
+  const backend = { read: async (k) => values[k] ?? null, write: async (k, v) => { values[k] = v; }, log: () => {} };
+  const s = await start({ state: createStateStore(backend) });
+  try { await deliver(s.base, "workflow_run", mainRun("success"), { delivery: "r1" }); } finally { await s.close(); }
+  const t = await start({ state: createStateStore(backend) });
+  try {
+    await deliver(t.base, "workflow_run", mainRun("success"), { delivery: "r2" });
+    assert.strictEqual(t.published.at(-1).subject, "ev.stella-rain.app.branch.main.main_still_passed");
+  } finally { await t.close(); }
 });
 
 test("a green run answered 503 is main_passed again when it is redelivered", async () => {

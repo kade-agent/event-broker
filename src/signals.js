@@ -2,6 +2,7 @@
 // One signal per kept event, and its v2 subject and message (agent-config
 // docs/event-broker-design.md, section 9). Nothing publishes v2 yet.
 const { token } = require("./normalize");
+const { stateKey, createStateStore } = require("./stream");
 
 const FAILED = new Set(["failure", "timed_out", "action_required", "startup_failure"]);
 const MERGE_STATES = ["behind", "dirty", "clean", "blocked", "unstable", "draft"];
@@ -62,19 +63,20 @@ function v2Of(e, defaultBranch) {
 }
 
 // Decision 16: a pass on main is main_passed only when that workflow (repository and name) last
-// failed there, or has not run there since the receiver started; otherwise main_still_passed.
-// apply(v2) -> { v2, commit }: the caller commits after both publishes succeed, so a delivery
-// answered 503 gets the same signal when it is redelivered. The state is in memory, like
-// mergeable.js: after a restart each workflow's first pass is main_passed again.
-function createMainRuns() {
-  const passed = new Map(); // "owner/repo@workflow" -> true after a pass, false after a failure
+// failed there, or has no state; otherwise main_still_passed. await apply(v2) -> { v2, commit }: the
+// caller awaits commit() after both publishes succeed, so a delivery answered 503 gets the same
+// signal when it is redelivered. Decision 19: the state is the store's key
+// state.<owner>.<repo>.main.<workflow> ({passed}), kept in STATE, so a restart repeats nothing.
+function createMainRuns({ store = createStateStore() } = {}) {
   return {
-    apply(v2) {
+    async apply(v2) {
       const { signal } = v2.event;
-      if (signal !== "main_passed" && signal !== "main_failed") return { v2, commit: () => {} };
-      const key = `${v2.event.repo}@${v2.event.check ? v2.event.check.name : ""}`;
-      const commit = () => passed.set(key, signal === "main_passed");
-      if (signal === "main_failed" || passed.get(key) !== true) return { v2, commit };
+      if (signal !== "main_passed" && signal !== "main_failed") return { v2, commit: async () => {} };
+      const key = stateKey(v2.event.repo, "main", (v2.event.check && v2.event.check.name) || "_");
+      const commit = () => store.put(key, { passed: signal === "main_passed" });
+      if (signal === "main_failed") return { v2, commit };
+      const last = await store.get(key);
+      if (!last || last.passed !== true) return { v2, commit };
       const still = "main_still_passed";
       return { v2: { subject: v2.subject.replace(/\.main_passed$/, `.${still}`), event: { ...v2.event, signal: still } }, commit };
     },

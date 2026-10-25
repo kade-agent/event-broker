@@ -117,3 +117,31 @@ test("a duplicate PubAck logs a duplicate line", async () => {
   await w.handle({ repo: "stella-rain/app", pr: 5 });
   assert.deepStrictEqual(logs, ["mergeable:stella-rain/app#5:sha5:dirty mergeable.dirty -> duplicate github.stella-rain.app.pr.5.mergeable ev.stella-rain.app.pr.5.merge_dirty"]);
 });
+
+test("decision 19: the last state is the store's key, so a restarted watch does not publish it again", async () => {
+  const { createStateStore } = require("../src/stream");
+  const values = {};
+  const backend = { read: async (k) => values[k] ?? null, write: async (k, v) => { values[k] = v; }, log: () => {} };
+  const first = watch(fakeGh({ 5: ["dirty"] }), { store: createStateStore(backend), log: () => {} });
+  await first.w.handle({ repo: "Stella-Rain/app", pr: 5 });
+  assert.strictEqual(first.published.length, 1);
+  assert.deepStrictEqual(values, { "state.stella-rain.app.pr.5.mergeable": { mergeable_state: "dirty", sha: "sha5" } });
+  const again = watch(fakeGh({ 5: ["dirty", "clean"] }), { store: createStateStore(backend), log: () => {} });
+  await again.w.handle({ repo: "Stella-Rain/app", pr: 5 });
+  assert.strictEqual(again.published.length, 0);
+  await again.w.handle({ repo: "Stella-Rain/app", pr: 5 });
+  assert.strictEqual(again.published.length, 1);
+  assert.strictEqual(again.published[0].event.mergeable_state, "clean");
+});
+
+test("decision 19: a failed publish writes no state, so the next check publishes it", async () => {
+  const { createStateStore } = require("../src/stream");
+  const store = createStateStore();
+  let fail = true;
+  const errors = [];
+  const w = createMergeWatch({ gh: fakeGh({ 5: ["dirty"] }), publish: async () => { if (fail) throw new Error("nats down"); },
+    sleep: async () => {}, store, onError: (e) => errors.push(e.message), log: () => {} });
+  await w.handle({ repo: "stella-rain/app", pr: 5 });
+  assert.deepStrictEqual(errors, ["nats down"]);
+  assert.strictEqual(await store.get("state.stella-rain.app.pr.5.mergeable"), null);
+});

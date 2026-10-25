@@ -126,45 +126,61 @@ test("every delivery normalize keeps gets a signal from SIGNALS", () => {
   }
 });
 
-// Decision 16: main_passed only when a workflow on main turns green.
+// Decision 16: main_passed only when a workflow on main turns green; decision 19 keeps the state in
+// a store (STATE), so a restarted receiver remembers it.
+const { createStateStore } = require("../src/stream");
 const mainRun = (conclusion, name = "Rust", repo = "stella-rain/core") =>
   v2Of({ ...blank("d1", repo), event: "workflow_run", action: "completed", branch: "main", conclusion,
     check: { name, url: null } }, "main");
-const signalsOf = (runs, list) => list.map((v2) => { const r = runs.apply(v2); r.commit(); return r.v2.event.signal; });
+const signalsOf = async (runs, list) => {
+  const out = [];
+  for (const v2 of list) { const r = await runs.apply(v2); await r.commit(); out.push(r.v2.event.signal); }
+  return out;
+};
 
-test("a workflow's first pass on main is main_passed, the next ones main_still_passed", () => {
+test("a workflow's first pass on main is main_passed, the next ones main_still_passed", async () => {
   const runs = createMainRuns();
-  assert.deepStrictEqual(signalsOf(runs, [mainRun("success"), mainRun("success"), mainRun("success")]),
+  assert.deepStrictEqual(await signalsOf(runs, [mainRun("success"), mainRun("success"), mainRun("success")]),
     ["main_passed", "main_still_passed", "main_still_passed"]);
-  const r = runs.apply(mainRun("success"));
+  const r = await runs.apply(mainRun("success"));
   assert.strictEqual(r.v2.subject, "ev.stella-rain.core.branch.main.main_still_passed");
 });
 
-test("a pass after a failure of the same workflow is main_passed again; main_other changes nothing", () => {
+test("a pass after a failure of the same workflow is main_passed again; main_other changes nothing", async () => {
   const runs = createMainRuns();
-  assert.deepStrictEqual(signalsOf(runs, [mainRun("success"), mainRun("failure"), mainRun("cancelled"),
+  assert.deepStrictEqual(await signalsOf(runs, [mainRun("success"), mainRun("failure"), mainRun("cancelled"),
     mainRun("success"), mainRun("cancelled"), mainRun("success")]),
   ["main_passed", "main_failed", "main_other", "main_passed", "main_other", "main_still_passed"]);
 });
 
-test("each workflow of each repository has its own state", () => {
+test("each workflow of each repository has its own state", async () => {
   const runs = createMainRuns();
-  assert.deepStrictEqual(signalsOf(runs, [mainRun("failure", "Rust"), mainRun("success", "Auto-merge"),
+  assert.deepStrictEqual(await signalsOf(runs, [mainRun("failure", "Rust"), mainRun("success", "Auto-merge"),
     mainRun("success", "Auto-merge"), mainRun("success", "Rust", "stella-rain/app"), mainRun("success", "Rust")]),
   ["main_failed", "main_passed", "main_still_passed", "main_passed", "main_passed"]);
 });
 
-test("without commit the state does not move, so a retried delivery gets the same signal", () => {
+test("without commit the state does not move, so a retried delivery gets the same signal", async () => {
   const runs = createMainRuns();
-  assert.strictEqual(runs.apply(mainRun("success")).v2.event.signal, "main_passed");
-  assert.strictEqual(runs.apply(mainRun("success")).v2.event.signal, "main_passed");
+  assert.strictEqual((await runs.apply(mainRun("success"))).v2.event.signal, "main_passed");
+  assert.strictEqual((await runs.apply(mainRun("success"))).v2.event.signal, "main_passed");
 });
 
-test("any other signal passes through unchanged", () => {
+test("any other signal passes through unchanged", async () => {
   const runs = createMainRuns();
   const v2 = v2Of(ev({ event: "workflow_run", conclusion: "success", pr: 3, branch: "claude/x" }), "main");
-  const r = runs.apply(v2);
-  r.commit();
+  const r = await runs.apply(v2);
+  await r.commit();
   assert.strictEqual(r.v2, v2);
-  assert.strictEqual(runs.apply(mainRun("success")).v2.event.signal, "main_passed");
+  assert.strictEqual((await runs.apply(mainRun("success"))).v2.event.signal, "main_passed");
+});
+
+test("decision 19: the state is the store's key state.<owner>.<repo>.main.<workflow>, so a restart repeats nothing", async () => {
+  const values = {};
+  const backend = { read: async (k) => values[k] ?? null, write: async (k, v) => { values[k] = v; }, log: () => {} };
+  const runs = createMainRuns({ store: createStateStore(backend) });
+  assert.deepStrictEqual(await signalsOf(runs, [mainRun("success", "Rust check")]), ["main_passed"]);
+  assert.deepStrictEqual(values, { "state.stella-rain.core.main.Rust_check": { passed: true } });
+  const restarted = createMainRuns({ store: createStateStore(backend) });
+  assert.deepStrictEqual(await signalsOf(restarted, [mainRun("success", "Rust check")]), ["main_still_passed"]);
 });
