@@ -6,6 +6,7 @@ const { normalize, mergeTrigger, token } = require("../src/normalize");
 const repository = { full_name: "stella-rain/app", default_branch: "main" };
 const pr = { number: 341, merged: true, draft: false, auto_merge: { merge_method: "squash" }, head: { ref: "claude/z3-orbs", sha: "9f2c1e0" } };
 const D = "1f2e-guid";
+const v1 = ({ subject, event }) => ({ subject, event });
 
 const blank = {
   delivery: D, repo: "stella-rain/app", pr: null, branch: null, event: null, action: null, merged: null,
@@ -14,7 +15,7 @@ const blank = {
 };
 
 test("a merged PR becomes one event on its PR subject", () => {
-  assert.deepStrictEqual(normalize("pull_request", { action: "closed", pull_request: pr, repository }, D), {
+  assert.deepStrictEqual(v1(normalize("pull_request", { action: "closed", pull_request: pr, repository }, D)), {
     subject: "github.stella-rain.app.pr.341.pull_request",
     event: { ...blank, pr: 341, branch: "claude/z3-orbs", event: "pull_request", action: "closed",
       merged: true, draft: false, auto_merge: true, sha: "9f2c1e0" },
@@ -67,7 +68,7 @@ test("a submitted review carries its state as the conclusion", () => {
 });
 
 test("a push counts only on the default branch", () => {
-  assert.deepStrictEqual(normalize("push", { ref: "refs/heads/main", after: "def", repository }, D), {
+  assert.deepStrictEqual(v1(normalize("push", { ref: "refs/heads/main", after: "def", repository }, D)), {
     subject: "github.stella-rain.app.push.main",
     event: { ...blank, branch: "main", event: "push", sha: "def" },
   });
@@ -103,7 +104,7 @@ const issue = (extra = {}) => ({ number: 4, title: "SECRET TITLE", body: "SECRET
 
 test("a labeled issue is kept with its label name", () => {
   const r = normalize("issues", { action: "labeled", issue: issue(), label: { name: "status:running" }, repository: tasks }, D);
-  assert.deepStrictEqual(r, {
+  assert.deepStrictEqual(v1(r), {
     subject: "github.kade-agent.tasks.issue.4.issues",
     event: { ...blank, repo: "kade-agent/tasks", issue: 4, event: "issues", action: "labeled", label: "status:running" },
   });

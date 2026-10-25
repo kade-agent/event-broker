@@ -1,5 +1,5 @@
 "use strict";
-// One GitHub delivery -> {subject, event} for JetStream (agent-config docs/event-broker-design.md,
+// One GitHub delivery -> {subject, event, v2} for JetStream (agent-config docs/event-broker-design.md,
 // section 4), or null when the dispatcher has no use for it. mergeTrigger says whether the
 // delivery should start a mergeability check (section 5): webhooks carry no reliable
 // mergeable_state, so the receiver asks GitHub after a push to a base branch or a PR update.
@@ -89,7 +89,9 @@ function normalize(event, payload, delivery) {
   const fields = handler(payload);
   if (!fields) return null;
   const e = { ...blank(delivery, payload.repository.full_name), ...fields, event };
-  return { subject: subjectOf(e), event: e };
+  // signals.js needs token() from here, so it is loaded on first use.
+  const { v2Of } = require("./signals");
+  return { subject: subjectOf(e), event: e, v2: v2Of(e, payload.repository.default_branch) };
 }
 
 function mergeTrigger(event, payload) {
