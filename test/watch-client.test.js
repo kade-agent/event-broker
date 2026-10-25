@@ -555,3 +555,12 @@ test("state lines: --json is one object, PRs by number", () => {
   const prs = [{ pr: 9 }, { pr: 3 }];
   assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true)[0]), { repo: "kade-agent/x", red: [], prs: [{ pr: 3 }, { pr: 9 }] });
 });
+
+// ---- decision 23: the DONE/BLOCKED line ----
+
+test("line: line= after author on a comment entry, as a JSON string", () => {
+  const m = msg({ signal: "pr_comment", repo: "a/b", pr: 3, comment: { id: 1, author: "enjay27", url: "u", line: "DONE T1 a/b#3: ok" }, delivery: "D1" });
+  assert.strictEqual(formatLine(m, false), 'pr_comment a/b#3 url=u author=enjay27 line="DONE T1 a/b#3: ok" delivery=D1');
+  const none = msg({ signal: "pr_comment", repo: "a/b", pr: 3, comment: { id: 1, author: "x", url: "u", line: null }, delivery: "D1" });
+  assert.strictEqual(formatLine(none, false), "pr_comment a/b#3 url=u author=x delivery=D1");
+});
