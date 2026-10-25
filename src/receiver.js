@@ -157,11 +157,12 @@ async function main() {
   const state = createStateStore(stateBackend(accounts));
   // Decision 21: every v2 event on a PR also updates that PR's snapshot in STATE.
   const { createPrSnapshots, withSnapshots } = require("./stream");
-  const publish = withSnapshots(publisherFor(publishers), createPrSnapshots({ store: state }));
+  const snapshots = createPrSnapshots({ store: state });
+  const publish = withSnapshots(publisherFor(publishers), snapshots);
 
   if (!process.env.APP_ID) throw new Error("APP_ID is not set");
   const app = createApp({ appId: process.env.APP_ID, privateKey: fileSetting("APP_PRIVATE_KEY_FILE") });
-  const watch = createMergeWatch({ gh: app, publish, store: state });
+  const watch = createMergeWatch({ gh: app, publish, store: state, snapshots });
   const server = createReceiver({ secret: fileSetting("WEBHOOK_SECRET_FILE"), allowedOwners, publish, state, onTrigger: (t) => watch.handle(t) });
   const port = Number(process.env.PORT || 8787);
   server.listen(port, () => console.log(`event-broker receiver on ${port}`));
