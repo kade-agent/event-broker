@@ -121,7 +121,8 @@ test("receiver A writes and reads back its state through STATE; a second write r
     await js.publish(key, JSON.stringify({ passed: false }));
     await js.publish(key, JSON.stringify({ passed: true }));
     assert.deepStrictEqual((await jsm.streams.getMessage("STATE", { last_by_subj: key })).json(), { passed: true });
-    assert.strictEqual((await jsm.streams.info("STATE")).state.messages, 1);
+    // Only this key: the other integration files run in parallel and write their own STATE subjects.
+    assert.strictEqual((await jsm.streams.info("STATE", { subjects_filter: key })).state.subjects[key], 1);
   } finally { await nc.close(); }
   const reader = await lan(env.READER_SEED_A);
   try {
