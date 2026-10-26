@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 "use strict";
 // The dispatcher's PR watch (agent-config docs/event-broker-design.md, section 9; pr-watch.md there):
-//   node client/watch.js --owner <org> [--profile dispatcher] [--json] [--window 30]
-//   node client/watch.js --owner <org> --state <org>/<repo> [--json]   (prints STATE and exits; decision 21)
-// Run it as a Claude Code Monitor command. Each stdout line is a SUMMARY of a 30 s window (one event
-// with --window 0), WATCH-ARMED, WATCH-ALIVE or BROKER-DOWN. The logic is in watch-core.js; this file only wires the real NATS connection.
+//   node client/watch.js --owner <org> [--profile dispatcher] [--json] [--window 30] [--alive]
+//   node client/watch.js --owner <org> --state <org>/<repo> [--json] [--all]   (prints STATE and exits; decisions 21, 27)
+// Run it as a Claude Code Monitor command. Its output is a SUMMARY of a 30 s window (a header line,
+// then one entry per line; one line per event with --window 0), WATCH-ARMED, WATCH-ALIVE (with
+// --alive) or BROKER-DOWN. The logic is in watch-core.js; this file only wires the real NATS connection.
 const fs = require("node:fs");
 const os = require("node:os");
 const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");
@@ -65,7 +66,7 @@ async function main() {
     try {
       const opts = { servers: settings.url, authenticator: nkeyAuthenticator(seedText()), timeout: 5000 };
       nc = /^wss?:/.test(settings.url) ? await wsconnect(opts) : await connect(opts);
-      for (const line of formatState(await readState(nc, settings.owner, settings.state), settings.json)) console.log(line);
+      for (const line of formatState(await readState(nc, settings.owner, settings.state), settings.json, settings.all)) console.log(line);
       return 0;
     } catch (e) {
       console.log(`BROKER-DOWN ${e.message}`);

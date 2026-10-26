@@ -25,8 +25,8 @@ const resolve = (over = {}) => resolveSettings({ argv: ["--owner", "kade-agent"]
 const fatal = (code, re) => (e) => e instanceof Fatal && e.exitCode === code && re.test(e.message);
 
 test("arguments: --owner, --profile, --json and --window", () => {
-  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0, state: undefined });
-  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30, state: undefined });
+  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0, state: undefined, all: false, alive: false });
+  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30, state: undefined, all: false, alive: false });
   assert.strictEqual(parseArgs(["--state", "kade-agent/x"]).state, "kade-agent/x");
   assert.throws(() => parseArgs(["--state"]), fatal(2, /--state/));
   assert.throws(() => parseArgs(["--state", "no-slash"]), fatal(2, /--state/));
@@ -310,8 +310,9 @@ async function open(h) {
   return p;
 }
 
-test("alive: 600 s without a line prints WATCH-ALIVE from a fresh consumer info; 300 s prints nothing", async () => {
+test("alive: with --alive, 600 s without a line prints WATCH-ALIVE from a fresh consumer info; 300 s prints nothing", async () => {
   const h = harness({ pending: 5 });
+  h.deps.settings.alive = true;
   const p = open(h);
   await new Promise((r) => setImmediate(r));
   for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
@@ -441,14 +442,27 @@ test("ending: a connect that finishes after the run ended is closed", async () =
 
 const { formatSummary } = require("../client/watch-core");
 
-test("summary line: entries in first-seen order, repeats of signal+target+check are the latest with count=", () => {
+test("summary: a header line, then one entry per line; repeats of signal+target+check are the latest with count= (decision 25)", () => {
   const a = msg({ signal: "main_failed", repo: "a/b", branch: "main", check: { name: "Rust", url: null }, delivery: "D1" });
   const b = msg({ signal: "pr_merged", repo: "a/b", pr: 3, delivery: "D2" });
   const a2 = { ...a, delivery: "D3" };
   const c = msg({ signal: "main_failed", repo: "a/b", branch: "main", check: { name: "Lint", url: null }, delivery: "D4" });
-  assert.strictEqual(formatSummary([a, b, a2, c], false),
-    "SUMMARY 4 events | main_failed a/b@main check=Rust delivery=D3 count=2 | pr_merged a/b#3 delivery=D2 | main_failed a/b@main check=Lint delivery=D4");
-  assert.strictEqual(formatSummary([b], false), "SUMMARY 1 event | pr_merged a/b#3 delivery=D2");
+  // pr_merged ranks before main_failed; the two main_failed keep their first-seen order.
+  assert.strictEqual(formatSummary([a, b, a2, c], false), [
+    "SUMMARY 4 events 3 entries",
+    "pr_merged a/b#3 delivery=D2",
+    "main_failed a/b@main check=Rust delivery=D3 count=2",
+    "main_failed a/b@main check=Lint delivery=D4",
+  ].join("\n"));
+  assert.strictEqual(formatSummary([b], false), "SUMMARY 1 event 1 entry\npr_merged a/b#3 delivery=D2");
+});
+
+test("summary: entries by urgency, pr_merged, pr_closed, pr_report, main_failed, merge_dirty, merge_behind, main_passed, then the rest (decision 25)", () => {
+  const e = (signal, pr) => msg({ signal, repo: "a/b", pr, delivery: `D${pr}` });
+  const lines = formatSummary([e("issue_labeled", 1), e("main_passed", 2), e("merge_behind", 3), e("merge_dirty", 4),
+    e("main_failed", 5), e("pr_report", 6), e("pr_closed", 7), e("pr_merged", 8), e("automerge_off", 9)], false).split("\n");
+  assert.deepStrictEqual(lines.slice(1).map((l) => l.split(" ")[0]), ["pr_merged", "pr_closed", "pr_report", "main_failed",
+    "merge_dirty", "merge_behind", "main_passed", "issue_labeled", "automerge_off"]);
 });
 
 test("summary line: --json is one object with every event, ungrouped", () => {
@@ -472,7 +486,7 @@ test("summary: events of one window are one line after 30 s, acked after it; not
   assert.deepStrictEqual(h.out, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=0"]);
   assert.ok(!h.calls.some((c) => c.startsWith("ack")));
   await tickAt(h, 30000);
-  assert.strictEqual(h.out[1], "SUMMARY 2 events | pr_merged a/b#1 delivery=D1 | pr_merged a/b#2 delivery=D2");
+  assert.strictEqual(h.out[1], "SUMMARY 2 events 2 entries\npr_merged a/b#1 delivery=D1\npr_merged a/b#2 delivery=D2");
   assert.deepStrictEqual(h.calls.filter((c) => c !== "close").slice(-3), ["write:SUMMARY", "ack:1", "ack:2"]);
   h.ac.abort();
   assert.strictEqual(await p, 0);
@@ -485,7 +499,7 @@ test("summary: the window starts at its first event, not at the start of the wat
   await tickAt(h, 75000);
   assert.strictEqual(h.out.length, 1);
   await tickAt(h, 80000);
-  assert.match(h.out[1], /^SUMMARY 1 event \| pr_merged a\/b#1/);
+  assert.match(h.out[1], /^SUMMARY 1 event 1 entry\npr_merged a\/b#1/);
   h.ac.abort();
   await p;
 });
@@ -493,10 +507,10 @@ test("summary: the window starts at its first event, not at the start of the wat
 test("summary: the backlog counted at start is one summary as soon as it is read", async () => {
   const h = harness({ pending: 2, window: 30 });
   const { done: p } = await summaryRun(h, [ev(1), ev(2), ev(3)]);
-  assert.strictEqual(h.out[1], "SUMMARY 2 events | pr_merged a/b#1 delivery=D1 | pr_merged a/b#2 delivery=D2");
+  assert.strictEqual(h.out[1], "SUMMARY 2 events 2 entries\npr_merged a/b#1 delivery=D1\npr_merged a/b#2 delivery=D2");
   assert.strictEqual(h.out.length, 2); // event 3 waits for its own window
   await tickAt(h, 30000);
-  assert.strictEqual(h.out[2], "SUMMARY 1 event | pr_merged a/b#3 delivery=D3");
+  assert.strictEqual(h.out[2], "SUMMARY 1 event 1 entry\npr_merged a/b#3 delivery=D3");
   h.ac.abort();
   await p;
 });
@@ -537,13 +551,13 @@ test("settings: --state is carried; its owner must be --owner's (exit 2)", () =>
   assert.throws(() => resolve({ argv: ["--owner", "kade-agent", "--state", "stella-rain/x"] }), fatal(2, /--state/));
 });
 
-test("state lines: the red line, then one line per PR by number, null fields left out", () => {
+test("state lines with --all: the red line, then one line per PR by number, null fields left out", () => {
   const snap = (pr, o) => ({ repo: "kade-agent/x", pr, branch: null, sha: null, state: "open", draft: null, auto_merge: null,
     mergeable_state: null, checks: {}, review: null, last_comment: null, updated_at: "T", ...o });
   const prs = [snap(9, { state: "merged" }), snap(3, { branch: "claude/y", sha: "abcdef12345", mergeable_state: "behind",
     checks: { test: "failure", "lint check": "success" }, review: "approved", draft: false, auto_merge: true,
     last_comment: { author: "enjay27", url: "u" } })];
-  assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: ["Rust"], prs }, false), [
+  assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: ["Rust"], prs }, false, true), [
     "STATE kade-agent/x red=Rust",
     'pr kade-agent/x#3 state=open branch=claude/y sha=abcdef1 mergeable=behind checks="test:failure,lint check:success" review=approved draft=false auto_merge=true last_comment=enjay27 updated_at=T',
     "pr kade-agent/x#9 state=merged updated_at=T",
@@ -553,7 +567,30 @@ test("state lines: the red line, then one line per PR by number, null fields lef
 
 test("state lines: --json is one object, PRs by number", () => {
   const prs = [{ pr: 9 }, { pr: 3 }];
-  assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true)[0]), { repo: "kade-agent/x", red: [], prs: [{ pr: 3 }, { pr: 9 }] });
+  assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true, true)[0]), { repo: "kade-agent/x", red: [], prs: [{ pr: 3 }, { pr: 9 }] });
+});
+
+// ---- decision 27: --state shows open PRs and their failing or pending checks ----
+
+test("state lines: by default only open PRs, with only failed or pending (null) checks", () => {
+  const snap = (pr, o) => ({ repo: "kade-agent/x", pr, state: "open", checks: {}, updated_at: "T", ...o });
+  const prs = [snap(9, { state: "merged", checks: { test: "failure" } }), snap(4, { state: "closed" }),
+    snap(3, { checks: { test: "failure", lint: "success", bench: null, docs: "skipped", win: "timed_out" } }),
+    snap(5, { checks: { lint: "success" } })];
+  assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: [], prs }, false), [
+    "STATE kade-agent/x red=-",
+    "pr kade-agent/x#3 state=open checks=test:failure,bench:null,win:timed_out updated_at=T",
+    "pr kade-agent/x#5 state=open updated_at=T",
+  ]);
+  assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true)[0]).prs.map((p) => [p.pr, p.checks]),
+    [[3, { test: "failure", bench: null, win: "timed_out" }], [5, {}]]);
+});
+
+test("arguments: --all and --alive are flags", () => {
+  assert.deepStrictEqual([parseArgs([]).all, parseArgs([]).alive], [false, false]);
+  assert.deepStrictEqual([parseArgs(["--all"]).all, parseArgs(["--alive"]).alive], [true, true]);
+  assert.strictEqual(resolve({ argv: ["--owner", "kade-agent", "--state", "kade-agent/x", "--all"] }).all, true);
+  assert.strictEqual(resolve({ argv: ["--owner", "kade-agent", "--alive"] }).alive, true);
 });
 
 // ---- decision 23: the DONE/BLOCKED line ----
@@ -563,4 +600,80 @@ test("line: line= after author on a comment entry, as a JSON string", () => {
   assert.strictEqual(formatLine(m, false), 'pr_comment a/b#3 url=u author=enjay27 line="DONE T1 a/b#3: ok" delivery=D1');
   const none = msg({ signal: "pr_comment", repo: "a/b", pr: 3, comment: { id: 1, author: "x", url: "u", line: null }, delivery: "D1" });
   assert.strictEqual(formatLine(none, false), "pr_comment a/b#3 url=u author=x delivery=D1");
+});
+
+// ---- decision 26: the dispatcher's own labels are not echoed back ----
+
+test("ignore file: WATCH_IGNOREFILE, else <home>/.claude/dispatcher/ignore-<owner>", () => {
+  assert.strictEqual(resolve().ignoreFile, `${HOME}/.claude/dispatcher/ignore-kade-agent`);
+  assert.strictEqual(resolve({ env: { EVENT_BROKER_URL: "u", WATCH_IGNOREFILE: "/p/ign" } }).ignoreFile, "/p/ign");
+});
+
+const labeled = (seq, label, issue = 4) => ev(seq, { signal: "issue_labeled", pr: null, issue, label });
+const iso = (ms) => new Date(ms).toISOString();
+
+test("ignore file: a label the dispatcher set in the last hour is acked, not printed, and counted as ignored=", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  h.deps.settings.ignoreFile = "/p/ignore";
+  h.clock = 4000000;
+  h.fs.files["/p/ignore"] = `${iso(3000000)} label a/b#4 status:running\n${iso(100)} label a/b#4 status:planned\n`;
+  const { done: p } = await summaryRun(h, [labeled(1, "status:running"), labeled(2, "status:planned"), labeled(3, "status:running", 5), ev(6)]);
+  await tickAt(h, 4030000);
+  // #4 status:running matches a key of the last hour; status:planned's key is older; #5 has no key.
+  assert.strictEqual(h.out[1], [
+    "SUMMARY 3 events 3 entries ignored=1",
+    "pr_merged a/b#6 delivery=D6",
+    "issue_labeled a/b#4 label=status:planned delivery=D2",
+    "issue_labeled a/b#5 label=status:running delivery=D3",
+  ].join("\n"));
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")).sort(), ["ack:1", "ack:2", "ack:3", "ack:6"]);
+  h.ac.abort();
+  await p;
+});
+
+test("ignore file: a window of only ignored events prints nothing and acks them", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  h.deps.settings.ignoreFile = "/p/ignore";
+  h.fs.files["/p/ignore"] = `${iso(0)} label a/b#4 needs review\n`;
+  const { done: p } = await summaryRun(h, [labeled(1, "needs review")]);
+  await tickAt(h, 30000);
+  assert.strictEqual(h.out.length, 1);
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")), ["ack:1"]);
+  h.ac.abort();
+  await p;
+});
+
+test("ignore file: a missing file drops nothing; with --window 0 a match is acked, not printed", async () => {
+  const h = harness({ queue: [labeled(1, "x")] });
+  h.deps.settings.ignoreFile = "/p/none";
+  await run(h.deps);
+  assert.strictEqual(h.out[1], "issue_labeled a/b#4 label=x delivery=D1");
+  const h2 = harness({ queue: [labeled(1, "x"), ev(2)] });
+  h2.deps.settings.ignoreFile = "/p/ignore";
+  h2.fs.files["/p/ignore"] = `${iso(0)} label a/b#4 x\n`;
+  await run(h2.deps);
+  assert.deepStrictEqual(h2.out.slice(1), ["pr_merged a/b#2 delivery=D2"]);
+  assert.deepStrictEqual(h2.calls.filter((c) => c.startsWith("ack")), ["ack:1", "ack:2"]);
+});
+
+// ---- decision 28: quieter lines ----
+
+test("alive: without --alive the consumer info still runs every 600 s but prints nothing", async () => {
+  const h = harness({ pending: 5 });
+  let infos = 0;
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  h.conn.pending = async () => { infos++; return 9; };
+  await tickAt(h, 600000);
+  await tickAt(h, 1200000);
+  assert.strictEqual(h.out.length, 1);
+  assert.ok(infos >= 1, "the health probe still runs");
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+});
+
+test("line: delivery is its first 8 characters; --json keeps the full id", () => {
+  const m = msg({ signal: "pr_merged", repo: "a/b", pr: 1, delivery: "1f2e3d4c-5b6a-4789-90ab-cdef01234567" });
+  assert.strictEqual(formatLine(m, false), "pr_merged a/b#1 delivery=1f2e3d4c");
+  assert.strictEqual(JSON.parse(formatLine(m, true)).delivery, "1f2e3d4c-5b6a-4789-90ab-cdef01234567");
 });

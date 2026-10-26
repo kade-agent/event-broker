@@ -39,7 +39,9 @@ const ROWS = [
   [{ event: "issues", action: "closed", issue: 4 }, "issue_closed"],
   [{ event: "issues", action: "reopened", issue: 4 }, "issue_reopened"],
   [{ event: "issues", action: "labeled", issue: 4, label: "bug" }, "issue_labeled"],
-  [{ event: "issue_comment", action: "created", pr: 7 }, "pr_comment"],
+  [{ event: "issue_comment", action: "created", pr: 7, comment: { id: 1, author: "a", url: "u", line: null } }, "pr_comment"],
+  // Decision 24: a PR comment whose first line is a strict DONE or BLOCKED line is pr_report.
+  [{ event: "issue_comment", action: "created", pr: 7, comment: { id: 1, author: "a", url: "u", line: "DONE T1 a/b#7: ok" } }, "pr_report"],
   [{ event: "issue_comment", action: "created", issue: 4 }, "issue_comment"],
   [{ event: "push", branch: "main" }, "push_main"],
   [{ event: "push", branch: "claude/x" }, "push_branch"],
@@ -56,9 +58,9 @@ test("the table and createMainRuns cover every signal", () => {
   assert.deepStrictEqual(new Set([...ROWS.map(([, s]) => s), "main_still_passed"]), new Set(SIGNALS));
 });
 
-test("SIGNALS is the frozen list of 38 unique [a-z_] names", () => {
-  assert.strictEqual(SIGNALS.length, 38);
-  assert.strictEqual(new Set(SIGNALS).size, 38);
+test("SIGNALS is the frozen list of 39 unique [a-z_] names", () => {
+  assert.strictEqual(SIGNALS.length, 39);
+  assert.strictEqual(new Set(SIGNALS).size, 39);
   assert.ok(Object.isFrozen(SIGNALS));
   for (const s of SIGNALS) assert.match(s, /^[a-z_]+$/);
 });

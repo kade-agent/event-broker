@@ -13,10 +13,12 @@ class Fatal extends Error {
 }
 
 function parseArgs(argv) {
-  const out = { owner: undefined, profile: undefined, json: false, window: 30, state: undefined };
+  const out = { owner: undefined, profile: undefined, json: false, window: 30, state: undefined, all: false, alive: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") out.json = true;
+    else if (a === "--all") out.all = true; // decision 27
+    else if (a === "--alive") out.alive = true; // decision 28
     else if (a === "--owner" || a === "--profile" || a === "--window" || a === "--state") {
       if (i + 1 >= argv.length) throw new Fatal(`${a} needs a value`, 2);
       out[a.slice(2)] = argv[++i];
@@ -82,9 +84,10 @@ function resolveSettings({ argv, env, home, fs, platform }) {
   }
 
   return {
-    owner, url, keyFile, json: args.json, window: args.window, state: args.state,
+    owner, url, keyFile, json: args.json, window: args.window, state: args.state, all: args.all, alive: args.alive,
     profile: args.profile || "dispatcher",
     pidFile: get("WATCH_PIDFILE") || path.join(dir, `watch-${owner}.pid`),
+    ignoreFile: get("WATCH_IGNOREFILE") || path.join(dir, `ignore-${owner}`), // decision 26
   };
 }
 
@@ -107,17 +110,23 @@ function formatLine(m, json) {
     ["state_reason", m.state_reason],
     ["author", m.comment && m.comment.author],
     ["line", m.comment && m.comment.line], // decision 23
-    ["delivery", m.delivery],
+    ["delivery", m.delivery ? String(m.delivery).slice(0, 8) : null], // decision 28; --json has it all
   ];
   for (const [k, v] of fields) if (v != null && v !== "") parts.push(`${k}=${quote(String(v))}`);
   return parts.join(" ");
 }
 
-// Decision 17: one SUMMARY line for a window's events. Events with the same signal, target and
-// check are one entry, the latest, with count= when there are more; entries keep first-seen order.
-// --json: every event, ungrouped.
-function formatSummary(events, json) {
-  if (json) return JSON.stringify({ summary: true, count: events.length, events });
+// Decision 25: the most urgent entries first; the rest keep first-seen order after them.
+const URGENCY = ["pr_merged", "pr_closed", "pr_report", "main_failed", "merge_dirty", "merge_behind", "main_passed"];
+const rank = (signal) => { const i = URGENCY.indexOf(signal); return i < 0 ? URGENCY.length : i; };
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// Decision 17: one summary for a window's events. Events with the same signal, target and check
+// are one entry, the latest, with count= when there are more. Decision 25: a header line, then one
+// entry per line, by urgency (a Monitor cuts a long line). --json: every event, ungrouped.
+// Decision 26: ignored is how many of the window's events the ignore file dropped.
+function formatSummary(events, json, ignored = 0) {
+  if (json) return JSON.stringify({ summary: true, count: events.length, events, ...(ignored ? { ignored } : {}) });
   const groups = new Map();
   for (const m of events) {
     const n = m.pr ?? m.issue;
@@ -125,14 +134,37 @@ function formatSummary(events, json) {
     const g = groups.get(key);
     if (g) { g.last = m; g.count++; } else groups.set(key, { last: m, count: 1 });
   }
-  const entries = [...groups.values()].map((g) => formatLine(g.last, false) + (g.count > 1 ? ` count=${g.count}` : ""));
-  return [`SUMMARY ${events.length} event${events.length === 1 ? "" : "s"}`, ...entries].join(" | ");
+  const entries = [...groups.values()]
+    .map((g, i) => ({ g, i, r: rank(g.last.signal) }))
+    .sort((x, y) => x.r - y.r || x.i - y.i)
+    .map(({ g }) => formatLine(g.last, false) + (g.count > 1 ? ` count=${g.count}` : ""));
+  const header = `SUMMARY ${plural(events.length, "event", "events")} ${plural(entries.length, "entry", "entries")}`;
+  return [header + (ignored ? ` ignored=${ignored}` : ""), ...entries].join("\n");
 }
 
+// Decision 26: the dispatcher appends `<ISO time> label <owner>/<repo>#<n> <label>` after each label
+// it sets. The keys of the last hour; a missing or unreadable file gives none.
+const IGNORE_MS = 3600000;
+function ignoreKeys(fs, file, now) {
+  const keys = new Set();
+  const text = file ? readOrNull(fs, file) : null;
+  for (const raw of String(text ?? "").split(/\r?\n/)) {
+    const m = /^(\S+) (label \S+#\d+ .+)$/.exec(raw.trim());
+    const at = m ? Date.parse(m[1]) : NaN;
+    if (!Number.isNaN(at) && now - at <= IGNORE_MS) keys.add(m[2]);
+  }
+  return keys;
+}
+const ignoredBy = (keys, m) => m.signal === "issue_labeled" && keys.has(`label ${m.repo}#${m.issue} ${m.label}`);
+
 // Decision 21 (S3): watch.js --state's lines. The red line, then one line per PR snapshot by number,
-// null fields left out and values quoted as in an entry. --json: one object.
-function formatState({ repo, red, prs }, json) {
-  const sorted = [...prs].sort((a, b) => a.pr - b.pr);
+// null fields left out and values quoted as in an entry. --json: one object. Decision 27: only open
+// PRs, with only their failed or pending (null: no conclusion recorded) checks; all = every one.
+const FAILED = new Set(["failure", "timed_out", "action_required", "startup_failure"]);
+const openOnly = (s) => ({ ...s, checks: Object.fromEntries(Object.entries(s.checks || {}).filter(([, v]) => v == null || FAILED.has(v))) });
+function formatState({ repo, red, prs }, json, all = false) {
+  const shown = all ? prs : prs.filter((s) => s.state === "open").map(openOnly);
+  const sorted = [...shown].sort((a, b) => a.pr - b.pr);
   if (json) return [JSON.stringify({ repo, red, prs: sorted })];
   const line = (s) => {
     const checks = Object.entries(s.checks || {}).map(([k, v]) => `${k}:${v}`).join(",");
@@ -148,7 +180,7 @@ function formatState({ repo, red, prs }, json) {
 }
 
 const SEEN_MAX = 1000; // stream sequences remembered, to ack a redelivery without printing it again
-const ALIVE_MS = 600000; // no line printed for this long -> WATCH-ALIVE
+const ALIVE_MS = 600000; // quiet this long -> a consumer info, printed as WATCH-ALIVE with --alive
 const DOWN_MS = 120000; // disconnected for longer than this -> BROKER-DOWN
 const TICK_MS = 5000; // parent, disconnect and heartbeat checks
 const CONNECT_RETRY_MS = 5000;
@@ -167,6 +199,7 @@ async function run(d) {
   let conn = null;
   let armed = false;
   let lastLine = 0;
+  let lastProbe = 0; // decision 28: the consumer info runs without --alive too, as the health probe
   let disconnectedAt = null;
   let infoFails = 0;
   let aliveBusy = false;
@@ -207,12 +240,17 @@ async function run(d) {
     seen.add(seq);
     if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value);
   };
-  // Writes the open window as one line, then acks it. One flush at a time (the loop and the tick).
+  // Writes the open window as one summary (one write), then acks it; a window of only ignored
+  // events (decision 26) prints nothing and is acked. One flush at a time (the loop and the tick).
   const flush = () => (flushing ??= (async () => {
     const items = batch;
     batch = [];
     batchStart = null;
-    if (items.length && (await emit(formatSummary(items.map((m) => m.data), json)))) for (const m of items) await ack(m);
+    if (!items.length) return;
+    const keys = ignoreKeys(d.fs, d.settings.ignoreFile, d.now());
+    const shown = items.filter((m) => !ignoredBy(keys, m.data));
+    if (shown.length && !(await emit(formatSummary(shown.map((m) => m.data), json, items.length - shown.length)))) return;
+    for (const m of items) await ack(m);
   })().finally(() => { flushing = null; }));
   const windowDue = () => batch.length > 0 && d.now() - batchStart >= windowMs;
 
@@ -227,12 +265,13 @@ async function run(d) {
     try { d.checkParent(); } catch { end(0); return; }
     if (disconnectedAt != null && d.now() - disconnectedAt > DOWN_MS) { down(new Error("disconnected for over 120 s")); return; }
     if (windowDue()) await flush();
-    if (!armed || aliveBusy || d.now() - lastLine < ALIVE_MS) return;
+    if (!armed || aliveBusy || d.now() - Math.max(lastLine, lastProbe) < ALIVE_MS) return;
     aliveBusy = true;
     try {
       const n = await conn.pending();
       infoFails = 0;
-      await emit(`WATCH-ALIVE ${status(n)}`);
+      lastProbe = d.now();
+      if (d.settings.alive) await emit(`WATCH-ALIVE ${status(n)}`);
     } catch (e) {
       if (++infoFails >= 2) down(e);
     } finally { aliveBusy = false; }
@@ -281,7 +320,8 @@ async function run(d) {
       // Anything without a signal and a repo cannot be a line: drop it, or it would come back forever.
       const valid = m.data && m.data.signal && m.data.repo;
       if (windowMs === 0) {
-        if (valid && !(await emit(formatLine(m.data, json)))) return;
+        const ignored = valid && ignoredBy(ignoreKeys(d.fs, d.settings.ignoreFile, d.now()), m.data);
+        if (valid && !ignored && !(await emit(formatLine(m.data, json)))) return;
         remember(m.seq);
         await ack(m);
         continue;
