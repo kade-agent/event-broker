@@ -102,7 +102,7 @@ for (const [label, url] of [["LAN", env.NATS_URL], ["websocket", env.NATS_WS_URL
       await publish(nc, repo, message(repo, "review_approved"));
 
       assert.match(await w.next(), new RegExp(`^WATCH-ARMED ${A} consumer=wc-${id} unprocessed=\\d+$`));
-      assert.strictEqual(await w.next(), `ci_passed ${A}/${repo}#1 branch=claude/x sha=9f2c1e0 delivery=${passed.delivery}`);
+      assert.strictEqual(await w.next(), `ci_passed ${A}/${repo}#1 branch=claude/x sha=9f2c1e0 delivery=${passed.delivery.slice(0, 8)}`); // decision 28
       assert.strictEqual(await w.next(1500), null, "the consumer filter must drop review_approved");
       assert.ok(await drained(jsm, `wc-${id}`), "the printed message must be acked");
 
@@ -140,7 +140,7 @@ test("watch.js: with stdout closed after WATCH-ARMED it exits 3 without acking, 
     assert.match(await second.next(), /^WATCH-ARMED /);
     const line = await second.next();
     assert.ok(line && line.startsWith("ci_passed "), `got ${line}`);
-    assert.ok(line.endsWith(`delivery=${m.delivery}`));
+    assert.ok(line.endsWith(`delivery=${m.delivery.slice(0, 8)}`)); // decision 28
     assert.ok(await drained(jsm, `wc-${id}`));
   } finally {
     first.child.kill("SIGKILL");
