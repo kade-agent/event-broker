@@ -25,8 +25,8 @@ const resolve = (over = {}) => resolveSettings({ argv: ["--owner", "kade-agent"]
 const fatal = (code, re) => (e) => e instanceof Fatal && e.exitCode === code && re.test(e.message);
 
 test("arguments: --owner, --profile, --json and --window", () => {
-  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0, state: undefined });
-  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30, state: undefined });
+  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0, state: undefined, all: false, alive: false });
+  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30, state: undefined, all: false, alive: false });
   assert.strictEqual(parseArgs(["--state", "kade-agent/x"]).state, "kade-agent/x");
   assert.throws(() => parseArgs(["--state"]), fatal(2, /--state/));
   assert.throws(() => parseArgs(["--state", "no-slash"]), fatal(2, /--state/));
@@ -578,7 +578,7 @@ test("state lines: by default only open PRs, with only failed or pending (null) 
     snap(5, { checks: { lint: "success" } })];
   assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: [], prs }, false), [
     "STATE kade-agent/x red=-",
-    'pr kade-agent/x#3 state=open checks="test:failure,bench:null,win:timed_out" updated_at=T',
+    "pr kade-agent/x#3 state=open checks=test:failure,bench:null,win:timed_out updated_at=T",
     "pr kade-agent/x#5 state=open updated_at=T",
   ]);
   assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true)[0]).prs.map((p) => [p.pr, p.checks]),

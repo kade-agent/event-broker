@@ -13,10 +13,12 @@ class Fatal extends Error {
 }
 
 function parseArgs(argv) {
-  const out = { owner: undefined, profile: undefined, json: false, window: 30, state: undefined };
+  const out = { owner: undefined, profile: undefined, json: false, window: 30, state: undefined, all: false, alive: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") out.json = true;
+    else if (a === "--all") out.all = true; // decision 27
+    else if (a === "--alive") out.alive = true; // decision 28
     else if (a === "--owner" || a === "--profile" || a === "--window" || a === "--state") {
       if (i + 1 >= argv.length) throw new Fatal(`${a} needs a value`, 2);
       out[a.slice(2)] = argv[++i];
@@ -82,7 +84,7 @@ function resolveSettings({ argv, env, home, fs, platform }) {
   }
 
   return {
-    owner, url, keyFile, json: args.json, window: args.window, state: args.state,
+    owner, url, keyFile, json: args.json, window: args.window, state: args.state, all: args.all, alive: args.alive,
     profile: args.profile || "dispatcher",
     pidFile: get("WATCH_PIDFILE") || path.join(dir, `watch-${owner}.pid`),
     ignoreFile: get("WATCH_IGNOREFILE") || path.join(dir, `ignore-${owner}`), // decision 26
@@ -156,9 +158,13 @@ function ignoreKeys(fs, file, now) {
 const ignoredBy = (keys, m) => m.signal === "issue_labeled" && keys.has(`label ${m.repo}#${m.issue} ${m.label}`);
 
 // Decision 21 (S3): watch.js --state's lines. The red line, then one line per PR snapshot by number,
-// null fields left out and values quoted as in an entry. --json: one object.
-function formatState({ repo, red, prs }, json) {
-  const sorted = [...prs].sort((a, b) => a.pr - b.pr);
+// null fields left out and values quoted as in an entry. --json: one object. Decision 27: only open
+// PRs, with only their failed or pending (null: no conclusion recorded) checks; all = every one.
+const FAILED = new Set(["failure", "timed_out", "action_required", "startup_failure"]);
+const openOnly = (s) => ({ ...s, checks: Object.fromEntries(Object.entries(s.checks || {}).filter(([, v]) => v == null || FAILED.has(v))) });
+function formatState({ repo, red, prs }, json, all = false) {
+  const shown = all ? prs : prs.filter((s) => s.state === "open").map(openOnly);
+  const sorted = [...shown].sort((a, b) => a.pr - b.pr);
   if (json) return [JSON.stringify({ repo, red, prs: sorted })];
   const line = (s) => {
     const checks = Object.entries(s.checks || {}).map(([k, v]) => `${k}:${v}`).join(",");
