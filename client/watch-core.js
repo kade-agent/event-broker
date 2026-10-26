@@ -85,6 +85,7 @@ function resolveSettings({ argv, env, home, fs, platform }) {
     owner, url, keyFile, json: args.json, window: args.window, state: args.state,
     profile: args.profile || "dispatcher",
     pidFile: get("WATCH_PIDFILE") || path.join(dir, `watch-${owner}.pid`),
+    ignoreFile: get("WATCH_IGNOREFILE") || path.join(dir, `ignore-${owner}`), // decision 26
   };
 }
 
@@ -121,8 +122,9 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 // Decision 17: one summary for a window's events. Events with the same signal, target and check
 // are one entry, the latest, with count= when there are more. Decision 25: a header line, then one
 // entry per line, by urgency (a Monitor cuts a long line). --json: every event, ungrouped.
-function formatSummary(events, json) {
-  if (json) return JSON.stringify({ summary: true, count: events.length, events });
+// Decision 26: ignored is how many of the window's events the ignore file dropped.
+function formatSummary(events, json, ignored = 0) {
+  if (json) return JSON.stringify({ summary: true, count: events.length, events, ...(ignored ? { ignored } : {}) });
   const groups = new Map();
   for (const m of events) {
     const n = m.pr ?? m.issue;
@@ -134,8 +136,24 @@ function formatSummary(events, json) {
     .map((g, i) => ({ g, i, r: rank(g.last.signal) }))
     .sort((x, y) => x.r - y.r || x.i - y.i)
     .map(({ g }) => formatLine(g.last, false) + (g.count > 1 ? ` count=${g.count}` : ""));
-  return [`SUMMARY ${plural(events.length, "event", "events")} ${plural(entries.length, "entry", "entries")}`, ...entries].join("\n");
+  const header = `SUMMARY ${plural(events.length, "event", "events")} ${plural(entries.length, "entry", "entries")}`;
+  return [header + (ignored ? ` ignored=${ignored}` : ""), ...entries].join("\n");
 }
+
+// Decision 26: the dispatcher appends `<ISO time> label <owner>/<repo>#<n> <label>` after each label
+// it sets. The keys of the last hour; a missing or unreadable file gives none.
+const IGNORE_MS = 3600000;
+function ignoreKeys(fs, file, now) {
+  const keys = new Set();
+  const text = file ? readOrNull(fs, file) : null;
+  for (const raw of String(text ?? "").split(/\r?\n/)) {
+    const m = /^(\S+) (label \S+#\d+ .+)$/.exec(raw.trim());
+    const at = m ? Date.parse(m[1]) : NaN;
+    if (!Number.isNaN(at) && now - at <= IGNORE_MS) keys.add(m[2]);
+  }
+  return keys;
+}
+const ignoredBy = (keys, m) => m.signal === "issue_labeled" && keys.has(`label ${m.repo}#${m.issue} ${m.label}`);
 
 // Decision 21 (S3): watch.js --state's lines. The red line, then one line per PR snapshot by number,
 // null fields left out and values quoted as in an entry. --json: one object.
@@ -215,12 +233,17 @@ async function run(d) {
     seen.add(seq);
     if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value);
   };
-  // Writes the open window as one summary (one write), then acks it. One flush at a time (the loop and the tick).
+  // Writes the open window as one summary (one write), then acks it; a window of only ignored
+  // events (decision 26) prints nothing and is acked. One flush at a time (the loop and the tick).
   const flush = () => (flushing ??= (async () => {
     const items = batch;
     batch = [];
     batchStart = null;
-    if (items.length && (await emit(formatSummary(items.map((m) => m.data), json)))) for (const m of items) await ack(m);
+    if (!items.length) return;
+    const keys = ignoreKeys(d.fs, d.settings.ignoreFile, d.now());
+    const shown = items.filter((m) => !ignoredBy(keys, m.data));
+    if (shown.length && !(await emit(formatSummary(shown.map((m) => m.data), json, items.length - shown.length)))) return;
+    for (const m of items) await ack(m);
   })().finally(() => { flushing = null; }));
   const windowDue = () => batch.length > 0 && d.now() - batchStart >= windowMs;
 
@@ -289,7 +312,8 @@ async function run(d) {
       // Anything without a signal and a repo cannot be a line: drop it, or it would come back forever.
       const valid = m.data && m.data.signal && m.data.repo;
       if (windowMs === 0) {
-        if (valid && !(await emit(formatLine(m.data, json)))) return;
+        const ignored = valid && ignoredBy(ignoreKeys(d.fs, d.settings.ignoreFile, d.now()), m.data);
+        if (valid && !ignored && !(await emit(formatLine(m.data, json)))) return;
         remember(m.seq);
         await ack(m);
         continue;
