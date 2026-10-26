@@ -113,9 +113,14 @@ function formatLine(m, json) {
   return parts.join(" ");
 }
 
-// Decision 17: one SUMMARY line for a window's events. Events with the same signal, target and
-// check are one entry, the latest, with count= when there are more; entries keep first-seen order.
-// --json: every event, ungrouped.
+// Decision 25: the most urgent entries first; the rest keep first-seen order after them.
+const URGENCY = ["pr_merged", "pr_closed", "pr_report", "main_failed", "merge_dirty", "merge_behind", "main_passed"];
+const rank = (signal) => { const i = URGENCY.indexOf(signal); return i < 0 ? URGENCY.length : i; };
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// Decision 17: one summary for a window's events. Events with the same signal, target and check
+// are one entry, the latest, with count= when there are more. Decision 25: a header line, then one
+// entry per line, by urgency (a Monitor cuts a long line). --json: every event, ungrouped.
 function formatSummary(events, json) {
   if (json) return JSON.stringify({ summary: true, count: events.length, events });
   const groups = new Map();
@@ -125,8 +130,11 @@ function formatSummary(events, json) {
     const g = groups.get(key);
     if (g) { g.last = m; g.count++; } else groups.set(key, { last: m, count: 1 });
   }
-  const entries = [...groups.values()].map((g) => formatLine(g.last, false) + (g.count > 1 ? ` count=${g.count}` : ""));
-  return [`SUMMARY ${events.length} event${events.length === 1 ? "" : "s"}`, ...entries].join(" | ");
+  const entries = [...groups.values()]
+    .map((g, i) => ({ g, i, r: rank(g.last.signal) }))
+    .sort((x, y) => x.r - y.r || x.i - y.i)
+    .map(({ g }) => formatLine(g.last, false) + (g.count > 1 ? ` count=${g.count}` : ""));
+  return [`SUMMARY ${plural(events.length, "event", "events")} ${plural(entries.length, "entry", "entries")}`, ...entries].join("\n");
 }
 
 // Decision 21 (S3): watch.js --state's lines. The red line, then one line per PR snapshot by number,
@@ -207,7 +215,7 @@ async function run(d) {
     seen.add(seq);
     if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value);
   };
-  // Writes the open window as one line, then acks it. One flush at a time (the loop and the tick).
+  // Writes the open window as one summary (one write), then acks it. One flush at a time (the loop and the tick).
   const flush = () => (flushing ??= (async () => {
     const items = batch;
     batch = [];
