@@ -577,3 +577,57 @@ test("line: line= after author on a comment entry, as a JSON string", () => {
   const none = msg({ signal: "pr_comment", repo: "a/b", pr: 3, comment: { id: 1, author: "x", url: "u", line: null }, delivery: "D1" });
   assert.strictEqual(formatLine(none, false), "pr_comment a/b#3 url=u author=x delivery=D1");
 });
+
+// ---- decision 26: the dispatcher's own labels are not echoed back ----
+
+test("ignore file: WATCH_IGNOREFILE, else <home>/.claude/dispatcher/ignore-<owner>", () => {
+  assert.strictEqual(resolve().ignoreFile, `${HOME}/.claude/dispatcher/ignore-kade-agent`);
+  assert.strictEqual(resolve({ env: { EVENT_BROKER_URL: "u", WATCH_IGNOREFILE: "/p/ign" } }).ignoreFile, "/p/ign");
+});
+
+const labeled = (seq, label, issue = 4) => ev(seq, { signal: "issue_labeled", pr: null, issue, label });
+const iso = (ms) => new Date(ms).toISOString();
+
+test("ignore file: a label the dispatcher set in the last hour is acked, not printed, and counted as ignored=", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  h.deps.settings.ignoreFile = "/p/ignore";
+  h.clock = 4000000;
+  h.fs.files["/p/ignore"] = `${iso(3000000)} label a/b#4 status:running\n${iso(100)} label a/b#4 status:planned\n`;
+  const { done: p } = await summaryRun(h, [labeled(1, "status:running"), labeled(2, "status:planned"), labeled(3, "status:running", 5), ev(6)]);
+  await tickAt(h, 4030000);
+  // #4 status:running matches a key of the last hour; status:planned's key is older; #5 has no key.
+  assert.strictEqual(h.out[1], [
+    "SUMMARY 3 events 3 entries ignored=1",
+    "pr_merged a/b#6 delivery=D6",
+    "issue_labeled a/b#4 label=status:planned delivery=D2",
+    "issue_labeled a/b#5 label=status:running delivery=D3",
+  ].join("\n"));
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")).sort(), ["ack:1", "ack:2", "ack:3", "ack:6"]);
+  h.ac.abort();
+  await p;
+});
+
+test("ignore file: a window of only ignored events prints nothing and acks them", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  h.deps.settings.ignoreFile = "/p/ignore";
+  h.fs.files["/p/ignore"] = `${iso(0)} label a/b#4 needs review\n`;
+  const { done: p } = await summaryRun(h, [labeled(1, "needs review")]);
+  await tickAt(h, 30000);
+  assert.strictEqual(h.out.length, 1);
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")), ["ack:1"]);
+  h.ac.abort();
+  await p;
+});
+
+test("ignore file: a missing file drops nothing; with --window 0 a match is acked, not printed", async () => {
+  const h = harness({ queue: [labeled(1, "x")] });
+  h.deps.settings.ignoreFile = "/p/none";
+  await run(h.deps);
+  assert.strictEqual(h.out[1], "issue_labeled a/b#4 label=x delivery=D1");
+  const h2 = harness({ queue: [labeled(1, "x"), ev(2)] });
+  h2.deps.settings.ignoreFile = "/p/ignore";
+  h2.fs.files["/p/ignore"] = `${iso(0)} label a/b#4 x\n`;
+  await run(h2.deps);
+  assert.deepStrictEqual(h2.out.slice(1), ["pr_merged a/b#2 delivery=D2"]);
+  assert.deepStrictEqual(h2.calls.filter((c) => c.startsWith("ack")), ["ack:1", "ack:2"]);
+});
