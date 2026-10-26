@@ -141,17 +141,17 @@ test("other issue actions are not published", () => {
   }
 });
 
-test("a created issue comment carries id, author, URL and only a strict DONE/BLOCKED first line, never the rest", () => {
+test("a created issue comment carries id, author, URL and only a strict BLOCKED first line, never the rest", () => {
   const url = "https://github.com/kade-agent/tasks/issues/4#issuecomment-9";
-  // Decision 23: the first line rides along only when it is a strict DONE or BLOCKED line.
-  const comment = { id: 9, user: { login: "enjay27" }, html_url: url, body: "  DONE EB6 kade-agent/x#3: 2 files  \r\nSECRET second line" };
+  // Decisions 23 and 30: the first line rides along only when it is a strict BLOCKED line.
+  const comment = { id: 9, user: { login: "enjay27" }, html_url: url, body: "  BLOCKED EB6: needs a decision  \r\nSECRET second line" };
   const r = normalize("issue_comment", { action: "created", issue: issue(), comment, repository: tasks }, D);
   assert.strictEqual(r.subject, "github.kade-agent.tasks.issue.4.issue_comment");
-  assert.deepStrictEqual(r.event.comment, { id: 9, author: "enjay27", url, line: "DONE EB6 kade-agent/x#3: 2 files" });
+  assert.deepStrictEqual(r.event.comment, { id: 9, author: "enjay27", url, line: "BLOCKED EB6: needs a decision" });
   assert.strictEqual(r.event.pr, null);
   assert.strictEqual(r.event.issue, 4);
   assert.ok(!JSON.stringify(r.event).includes("SECRET"));
-  for (const body of ["looks DONE EB6 to me", "DONE", "done EB6", "", null, "BLOCKEDX EB6"]) {
+  for (const body of ["looks BLOCKED EB6 to me", "BLOCKED", "blocked EB6", "", null, "BLOCKEDX EB6", "DONE EB6 kade-agent/x#3: 2 files"]) {
     const o = normalize("issue_comment", { action: "created", issue: issue(), comment: { ...comment, body }, repository: tasks }, D);
     assert.strictEqual(o.event.comment.line, null, String(body));
   }

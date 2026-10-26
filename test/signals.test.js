@@ -40,8 +40,8 @@ const ROWS = [
   [{ event: "issues", action: "reopened", issue: 4 }, "issue_reopened"],
   [{ event: "issues", action: "labeled", issue: 4, label: "bug" }, "issue_labeled"],
   [{ event: "issue_comment", action: "created", pr: 7, comment: { id: 1, author: "a", url: "u", line: null } }, "pr_comment"],
-  // Decision 24: a PR comment whose first line is a strict DONE or BLOCKED line is pr_report.
-  [{ event: "issue_comment", action: "created", pr: 7, comment: { id: 1, author: "a", url: "u", line: "DONE T1 a/b#7: ok" } }, "pr_report"],
+  // Decisions 24 and 30: a PR comment whose first line is a strict BLOCKED line is pr_report.
+  [{ event: "issue_comment", action: "created", pr: 7, comment: { id: 1, author: "a", url: "u", line: "BLOCKED T1: why" } }, "pr_report"],
   [{ event: "issue_comment", action: "created", issue: 4 }, "issue_comment"],
   [{ event: "push", branch: "main" }, "push_main"],
   [{ event: "push", branch: "claude/x" }, "push_branch"],

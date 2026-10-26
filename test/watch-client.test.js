@@ -631,6 +631,26 @@ test("ignore file: a label the dispatcher set in the last hour is acked, not pri
   await p;
 });
 
+const closed = (seq, issue = 4) => ev(seq, { signal: "issue_closed", pr: null, issue });
+
+test("ignore file: a close the dispatcher made (decision 30) is acked, not printed; another issue's close still arrives", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  h.deps.settings.ignoreFile = "/p/ignore";
+  h.clock = 4000000;
+  h.fs.files["/p/ignore"] = `${iso(3000000)} close a/b#4\n${iso(100)} close a/b#6\n`;
+  const { done: p } = await summaryRun(h, [closed(1), closed(2, 5), closed(3, 6)]);
+  await tickAt(h, 4030000);
+  // #4 matches a key of the last hour; #6's key is older; #5 has none.
+  assert.strictEqual(h.out[1], [
+    "SUMMARY 2 events 2 entries ignored=1",
+    "issue_closed a/b#5 delivery=D2",
+    "issue_closed a/b#6 delivery=D3",
+  ].join("\n"));
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")).sort(), ["ack:1", "ack:2", "ack:3"]);
+  h.ac.abort();
+  await p;
+});
+
 test("ignore file: a window of only ignored events prints nothing and acks them", async () => {
   const h = harness({ pending: 0, window: 30 });
   h.deps.settings.ignoreFile = "/p/ignore";
