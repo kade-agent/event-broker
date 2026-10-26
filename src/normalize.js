@@ -28,8 +28,9 @@ const prFields = (pr) => ({
 // Agents' branches (global rules: claude/<task>, agent/<task>): their pushes are a task's progress.
 const TASK_BRANCH = /^(claude|agent)\//;
 
-// Decision 23: the one piece of comment text the stream carries, a strict DONE or BLOCKED first line.
-const STRICT_LINE = /^(DONE|BLOCKED) \S+/;
+// Decisions 23 and 30: the one piece of comment text the stream carries, a strict BLOCKED first line
+// (a merge is the DONE, so a DONE comment is not carried).
+const STRICT_LINE = /^BLOCKED \S+/;
 const strictLine = (body) => {
   const first = String(body ?? "").split(/\r?\n/, 1)[0].trim();
   return STRICT_LINE.test(first) ? first.slice(0, 300) : null;
