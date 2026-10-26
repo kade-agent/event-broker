@@ -441,14 +441,27 @@ test("ending: a connect that finishes after the run ended is closed", async () =
 
 const { formatSummary } = require("../client/watch-core");
 
-test("summary line: entries in first-seen order, repeats of signal+target+check are the latest with count=", () => {
+test("summary: a header line, then one entry per line; repeats of signal+target+check are the latest with count= (decision 25)", () => {
   const a = msg({ signal: "main_failed", repo: "a/b", branch: "main", check: { name: "Rust", url: null }, delivery: "D1" });
   const b = msg({ signal: "pr_merged", repo: "a/b", pr: 3, delivery: "D2" });
   const a2 = { ...a, delivery: "D3" };
   const c = msg({ signal: "main_failed", repo: "a/b", branch: "main", check: { name: "Lint", url: null }, delivery: "D4" });
-  assert.strictEqual(formatSummary([a, b, a2, c], false),
-    "SUMMARY 4 events | main_failed a/b@main check=Rust delivery=D3 count=2 | pr_merged a/b#3 delivery=D2 | main_failed a/b@main check=Lint delivery=D4");
-  assert.strictEqual(formatSummary([b], false), "SUMMARY 1 event | pr_merged a/b#3 delivery=D2");
+  // pr_merged ranks before main_failed; the two main_failed keep their first-seen order.
+  assert.strictEqual(formatSummary([a, b, a2, c], false), [
+    "SUMMARY 4 events 3 entries",
+    "pr_merged a/b#3 delivery=D2",
+    "main_failed a/b@main check=Rust delivery=D3 count=2",
+    "main_failed a/b@main check=Lint delivery=D4",
+  ].join("\n"));
+  assert.strictEqual(formatSummary([b], false), "SUMMARY 1 event 1 entry\npr_merged a/b#3 delivery=D2");
+});
+
+test("summary: entries by urgency, pr_merged, pr_closed, pr_report, main_failed, merge_dirty, merge_behind, main_passed, then the rest (decision 25)", () => {
+  const e = (signal, pr) => msg({ signal, repo: "a/b", pr, delivery: `D${pr}` });
+  const lines = formatSummary([e("issue_labeled", 1), e("main_passed", 2), e("merge_behind", 3), e("merge_dirty", 4),
+    e("main_failed", 5), e("pr_report", 6), e("pr_closed", 7), e("pr_merged", 8), e("automerge_off", 9)], false).split("\n");
+  assert.deepStrictEqual(lines.slice(1).map((l) => l.split(" ")[0]), ["pr_merged", "pr_closed", "pr_report", "main_failed",
+    "merge_dirty", "merge_behind", "main_passed", "issue_labeled", "automerge_off"]);
 });
 
 test("summary line: --json is one object with every event, ungrouped", () => {
@@ -472,7 +485,7 @@ test("summary: events of one window are one line after 30 s, acked after it; not
   assert.deepStrictEqual(h.out, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=0"]);
   assert.ok(!h.calls.some((c) => c.startsWith("ack")));
   await tickAt(h, 30000);
-  assert.strictEqual(h.out[1], "SUMMARY 2 events | pr_merged a/b#1 delivery=D1 | pr_merged a/b#2 delivery=D2");
+  assert.strictEqual(h.out[1], "SUMMARY 2 events 2 entries\npr_merged a/b#1 delivery=D1\npr_merged a/b#2 delivery=D2");
   assert.deepStrictEqual(h.calls.filter((c) => c !== "close").slice(-3), ["write:SUMMARY", "ack:1", "ack:2"]);
   h.ac.abort();
   assert.strictEqual(await p, 0);
@@ -485,7 +498,7 @@ test("summary: the window starts at its first event, not at the start of the wat
   await tickAt(h, 75000);
   assert.strictEqual(h.out.length, 1);
   await tickAt(h, 80000);
-  assert.match(h.out[1], /^SUMMARY 1 event \| pr_merged a\/b#1/);
+  assert.match(h.out[1], /^SUMMARY 1 event 1 entry\npr_merged a\/b#1/);
   h.ac.abort();
   await p;
 });
@@ -493,10 +506,10 @@ test("summary: the window starts at its first event, not at the start of the wat
 test("summary: the backlog counted at start is one summary as soon as it is read", async () => {
   const h = harness({ pending: 2, window: 30 });
   const { done: p } = await summaryRun(h, [ev(1), ev(2), ev(3)]);
-  assert.strictEqual(h.out[1], "SUMMARY 2 events | pr_merged a/b#1 delivery=D1 | pr_merged a/b#2 delivery=D2");
+  assert.strictEqual(h.out[1], "SUMMARY 2 events 2 entries\npr_merged a/b#1 delivery=D1\npr_merged a/b#2 delivery=D2");
   assert.strictEqual(h.out.length, 2); // event 3 waits for its own window
   await tickAt(h, 30000);
-  assert.strictEqual(h.out[2], "SUMMARY 1 event | pr_merged a/b#3 delivery=D3");
+  assert.strictEqual(h.out[2], "SUMMARY 1 event 1 entry\npr_merged a/b#3 delivery=D3");
   h.ac.abort();
   await p;
 });
