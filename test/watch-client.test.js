@@ -310,8 +310,9 @@ async function open(h) {
   return p;
 }
 
-test("alive: 600 s without a line prints WATCH-ALIVE from a fresh consumer info; 300 s prints nothing", async () => {
+test("alive: with --alive, 600 s without a line prints WATCH-ALIVE from a fresh consumer info; 300 s prints nothing", async () => {
   const h = harness({ pending: 5 });
+  h.deps.settings.alive = true;
   const p = open(h);
   await new Promise((r) => setImmediate(r));
   for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
@@ -653,4 +654,26 @@ test("ignore file: a missing file drops nothing; with --window 0 a match is acke
   await run(h2.deps);
   assert.deepStrictEqual(h2.out.slice(1), ["pr_merged a/b#2 delivery=D2"]);
   assert.deepStrictEqual(h2.calls.filter((c) => c.startsWith("ack")), ["ack:1", "ack:2"]);
+});
+
+// ---- decision 28: quieter lines ----
+
+test("alive: without --alive the consumer info still runs every 600 s but prints nothing", async () => {
+  const h = harness({ pending: 5 });
+  let infos = 0;
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  h.conn.pending = async () => { infos++; return 9; };
+  await tickAt(h, 600000);
+  await tickAt(h, 1200000);
+  assert.strictEqual(h.out.length, 1);
+  assert.ok(infos >= 1, "the health probe still runs");
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+});
+
+test("line: delivery is its first 8 characters; --json keeps the full id", () => {
+  const m = msg({ signal: "pr_merged", repo: "a/b", pr: 1, delivery: "1f2e3d4c-5b6a-4789-90ab-cdef01234567" });
+  assert.strictEqual(formatLine(m, false), "pr_merged a/b#1 delivery=1f2e3d4c");
+  assert.strictEqual(JSON.parse(formatLine(m, true)).delivery, "1f2e3d4c-5b6a-4789-90ab-cdef01234567");
 });
