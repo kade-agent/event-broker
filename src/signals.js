@@ -18,7 +18,7 @@ const SIGNALS = Object.freeze([
   "check_failed", "check_passed", "check_other",
   "review_changes", "review_comment", "review_approved", "review_dismissed", "review_other",
   "issue_closed", "issue_reopened", "issue_labeled",
-  "pr_comment", "issue_comment",
+  "pr_comment", "pr_report", "issue_comment",
   "push_main", "push_branch",
 ]);
 
@@ -44,7 +44,9 @@ function signalOf(e, defaultBranch) {
     case "issues":
       return `issue_${e.action}`;
     case "issue_comment":
-      return e.pr != null ? "pr_comment" : "issue_comment";
+      // Decision 24: a PR comment carrying a strict DONE/BLOCKED line (decision 23) is a report.
+      if (e.pr == null) return "issue_comment";
+      return e.comment && e.comment.line ? "pr_report" : "pr_comment";
     case "push":
       return e.branch === defaultBranch ? "push_main" : "push_branch";
     default:
