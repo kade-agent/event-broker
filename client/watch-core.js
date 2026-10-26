@@ -143,19 +143,21 @@ function formatSummary(events, json, ignored = 0) {
 }
 
 // Decision 26: the dispatcher appends `<ISO time> label <owner>/<repo>#<n> <label>` after each label
-// it sets. The keys of the last hour; a missing or unreadable file gives none.
+// it sets, and (decision 30) `<ISO time> close <owner>/<repo>#<n>` after each sub-issue it closes.
+// The keys of the last hour; a missing or unreadable file gives none.
 const IGNORE_MS = 3600000;
 function ignoreKeys(fs, file, now) {
   const keys = new Set();
   const text = file ? readOrNull(fs, file) : null;
   for (const raw of String(text ?? "").split(/\r?\n/)) {
-    const m = /^(\S+) (label \S+#\d+ .+)$/.exec(raw.trim());
+    const m = /^(\S+) (label \S+#\d+ .+|close \S+#\d+)$/.exec(raw.trim());
     const at = m ? Date.parse(m[1]) : NaN;
     if (!Number.isNaN(at) && now - at <= IGNORE_MS) keys.add(m[2]);
   }
   return keys;
 }
-const ignoredBy = (keys, m) => m.signal === "issue_labeled" && keys.has(`label ${m.repo}#${m.issue} ${m.label}`);
+const ignoredBy = (keys, m) => (m.signal === "issue_labeled" && keys.has(`label ${m.repo}#${m.issue} ${m.label}`))
+  || (m.signal === "issue_closed" && keys.has(`close ${m.repo}#${m.issue}`));
 
 // Decision 21 (S3): watch.js --state's lines. The red line, then one line per PR snapshot by number,
 // null fields left out and values quoted as in an entry. --json: one object. Decision 27: only open

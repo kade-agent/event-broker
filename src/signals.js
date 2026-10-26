@@ -44,7 +44,7 @@ function signalOf(e, defaultBranch) {
     case "issues":
       return `issue_${e.action}`;
     case "issue_comment":
-      // Decision 24: a PR comment carrying a strict DONE/BLOCKED line (decision 23) is a report.
+      // Decisions 24 and 30: a PR comment carrying a strict BLOCKED line (decision 23) is a report.
       if (e.pr == null) return "issue_comment";
       return e.comment && e.comment.line ? "pr_report" : "pr_comment";
     case "push":
