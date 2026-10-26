@@ -110,7 +110,7 @@ function formatLine(m, json) {
     ["state_reason", m.state_reason],
     ["author", m.comment && m.comment.author],
     ["line", m.comment && m.comment.line], // decision 23
-    ["delivery", m.delivery],
+    ["delivery", m.delivery ? String(m.delivery).slice(0, 8) : null], // decision 28; --json has it all
   ];
   for (const [k, v] of fields) if (v != null && v !== "") parts.push(`${k}=${quote(String(v))}`);
   return parts.join(" ");
@@ -180,7 +180,7 @@ function formatState({ repo, red, prs }, json, all = false) {
 }
 
 const SEEN_MAX = 1000; // stream sequences remembered, to ack a redelivery without printing it again
-const ALIVE_MS = 600000; // no line printed for this long -> WATCH-ALIVE
+const ALIVE_MS = 600000; // quiet this long -> a consumer info, printed as WATCH-ALIVE with --alive
 const DOWN_MS = 120000; // disconnected for longer than this -> BROKER-DOWN
 const TICK_MS = 5000; // parent, disconnect and heartbeat checks
 const CONNECT_RETRY_MS = 5000;
@@ -199,6 +199,7 @@ async function run(d) {
   let conn = null;
   let armed = false;
   let lastLine = 0;
+  let lastProbe = 0; // decision 28: the consumer info runs without --alive too, as the health probe
   let disconnectedAt = null;
   let infoFails = 0;
   let aliveBusy = false;
@@ -264,12 +265,13 @@ async function run(d) {
     try { d.checkParent(); } catch { end(0); return; }
     if (disconnectedAt != null && d.now() - disconnectedAt > DOWN_MS) { down(new Error("disconnected for over 120 s")); return; }
     if (windowDue()) await flush();
-    if (!armed || aliveBusy || d.now() - lastLine < ALIVE_MS) return;
+    if (!armed || aliveBusy || d.now() - Math.max(lastLine, lastProbe) < ALIVE_MS) return;
     aliveBusy = true;
     try {
       const n = await conn.pending();
       infoFails = 0;
-      await emit(`WATCH-ALIVE ${status(n)}`);
+      lastProbe = d.now();
+      if (d.settings.alive) await emit(`WATCH-ALIVE ${status(n)}`);
     } catch (e) {
       if (++infoFails >= 2) down(e);
     } finally { aliveBusy = false; }
