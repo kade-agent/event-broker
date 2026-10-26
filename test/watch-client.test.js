@@ -550,13 +550,13 @@ test("settings: --state is carried; its owner must be --owner's (exit 2)", () =>
   assert.throws(() => resolve({ argv: ["--owner", "kade-agent", "--state", "stella-rain/x"] }), fatal(2, /--state/));
 });
 
-test("state lines: the red line, then one line per PR by number, null fields left out", () => {
+test("state lines with --all: the red line, then one line per PR by number, null fields left out", () => {
   const snap = (pr, o) => ({ repo: "kade-agent/x", pr, branch: null, sha: null, state: "open", draft: null, auto_merge: null,
     mergeable_state: null, checks: {}, review: null, last_comment: null, updated_at: "T", ...o });
   const prs = [snap(9, { state: "merged" }), snap(3, { branch: "claude/y", sha: "abcdef12345", mergeable_state: "behind",
     checks: { test: "failure", "lint check": "success" }, review: "approved", draft: false, auto_merge: true,
     last_comment: { author: "enjay27", url: "u" } })];
-  assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: ["Rust"], prs }, false), [
+  assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: ["Rust"], prs }, false, true), [
     "STATE kade-agent/x red=Rust",
     'pr kade-agent/x#3 state=open branch=claude/y sha=abcdef1 mergeable=behind checks="test:failure,lint check:success" review=approved draft=false auto_merge=true last_comment=enjay27 updated_at=T',
     "pr kade-agent/x#9 state=merged updated_at=T",
@@ -566,7 +566,30 @@ test("state lines: the red line, then one line per PR by number, null fields lef
 
 test("state lines: --json is one object, PRs by number", () => {
   const prs = [{ pr: 9 }, { pr: 3 }];
-  assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true)[0]), { repo: "kade-agent/x", red: [], prs: [{ pr: 3 }, { pr: 9 }] });
+  assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true, true)[0]), { repo: "kade-agent/x", red: [], prs: [{ pr: 3 }, { pr: 9 }] });
+});
+
+// ---- decision 27: --state shows open PRs and their failing or pending checks ----
+
+test("state lines: by default only open PRs, with only failed or pending (null) checks", () => {
+  const snap = (pr, o) => ({ repo: "kade-agent/x", pr, state: "open", checks: {}, updated_at: "T", ...o });
+  const prs = [snap(9, { state: "merged", checks: { test: "failure" } }), snap(4, { state: "closed" }),
+    snap(3, { checks: { test: "failure", lint: "success", bench: null, docs: "skipped", win: "timed_out" } }),
+    snap(5, { checks: { lint: "success" } })];
+  assert.deepStrictEqual(formatState({ repo: "kade-agent/x", red: [], prs }, false), [
+    "STATE kade-agent/x red=-",
+    'pr kade-agent/x#3 state=open checks="test:failure,bench:null,win:timed_out" updated_at=T',
+    "pr kade-agent/x#5 state=open updated_at=T",
+  ]);
+  assert.deepStrictEqual(JSON.parse(formatState({ repo: "kade-agent/x", red: [], prs }, true)[0]).prs.map((p) => [p.pr, p.checks]),
+    [[3, { test: "failure", bench: null, win: "timed_out" }], [5, {}]]);
+});
+
+test("arguments: --all and --alive are flags", () => {
+  assert.deepStrictEqual([parseArgs([]).all, parseArgs([]).alive], [false, false]);
+  assert.deepStrictEqual([parseArgs(["--all"]).all, parseArgs(["--alive"]).alive], [true, true]);
+  assert.strictEqual(resolve({ argv: ["--owner", "kade-agent", "--state", "kade-agent/x", "--all"] }).all, true);
+  assert.strictEqual(resolve({ argv: ["--owner", "kade-agent", "--alive"] }).alive, true);
 });
 
 // ---- decision 23: the DONE/BLOCKED line ----
