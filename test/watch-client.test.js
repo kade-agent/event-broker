@@ -191,7 +191,7 @@ const ev = (seq, over = {}) => ({ seq, data: msg({ signal: "pr_merged", repo: "a
 // harness aborts the run, and the pull never resolves (the real one would block for a minute).
 // window 0: one line per event, as the tests before decision 17 expect; the summary tests pass 30.
 function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owner = "kade-agent", writeFails = false, connectFails = 0, pidText = "4242\n", window = 0 } = {}) {
-  const h = { out: [], calls: [], clock: 0, ticks: [], queue: [...queue], connects: 0, nexts: 0, sleeps: [] };
+  const h = { out: [], err: [], calls: [], clock: 0, ticks: [], queue: [...queue], connects: 0, nexts: 0, sleeps: [] };
   const ac = new AbortController();
   const fs = fakeFs({ "/p/watch.pid": pidText });
   h.fs = fs;
@@ -217,6 +217,7 @@ function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owne
       return conn;
     },
     write: async (line) => { h.calls.push(`write:${line.split(" ")[0]}`); if (writeFails) throw new Error("EPIPE"); h.out.push(line); },
+    log: (line) => { h.err.push(line); },
     now: () => h.clock,
     sleep: async (ms) => { h.sleeps.push(ms); },
     every: (ms, fn) => { h.ticks.push({ ms, fn }); return () => {}; },
@@ -732,4 +733,27 @@ test("line: delivery is its first 8 characters; --json keeps the full id", () =>
   const m = msg({ signal: "pr_merged", repo: "a/b", pr: 1, delivery: "1f2e3d4c-5b6a-4789-90ab-cdef01234567" });
   assert.strictEqual(formatLine(m, false), "pr_merged a/b#1 delivery=1f2e3d4c");
   assert.strictEqual(JSON.parse(formatLine(m, true)).delivery, "1f2e3d4c-5b6a-4789-90ab-cdef01234567");
+});
+
+// Decision 31 (agent-config, Kade 2026-10-27): a watch that prints nothing is armed. WATCH-ARMED with
+// nothing waiting goes to the log (stderr), so a re-arm costs the dispatcher no turn; with a backlog
+// it stays on stdout, where the backlog's summary follows anyway. Every failure is BROKER-DOWN on stdout.
+test("armed: with unprocessed=0 WATCH-ARMED goes to the log, and stdout stays empty (decision 31)", async () => {
+  const h = harness({ pending: 0 });
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(h.out, []);
+  assert.deepStrictEqual(h.err, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=0"]);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+});
+
+test("armed: with a backlog WATCH-ARMED stays the first stdout line, not in the log (decision 31)", async () => {
+  const h = harness({ pending: 2 });
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(h.out, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=2"]);
+  assert.deepStrictEqual(h.err, []);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
 });
