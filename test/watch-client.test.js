@@ -191,7 +191,7 @@ const ev = (seq, over = {}) => ({ seq, data: msg({ signal: "pr_merged", repo: "a
 // harness aborts the run, and the pull never resolves (the real one would block for a minute).
 // window 0: one line per event, as the tests before decision 17 expect; the summary tests pass 30.
 function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owner = "kade-agent", writeFails = false, connectFails = 0, pidText = "4242\n", window = 0 } = {}) {
-  const h = { out: [], calls: [], clock: 0, ticks: [], queue: [...queue], connects: 0, nexts: 0, sleeps: [] };
+  const h = { out: [], err: [], calls: [], clock: 0, ticks: [], queue: [...queue], connects: 0, nexts: 0, sleeps: [] };
   const ac = new AbortController();
   const fs = fakeFs({ "/p/watch.pid": pidText });
   h.fs = fs;
@@ -217,6 +217,7 @@ function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owne
       return conn;
     },
     write: async (line) => { h.calls.push(`write:${line.split(" ")[0]}`); if (writeFails) throw new Error("EPIPE"); h.out.push(line); },
+    log: (line) => { h.err.push(line); },
     now: () => h.clock,
     sleep: async (ms) => { h.sleeps.push(ms); },
     every: (ms, fn) => { h.ticks.push({ ms, fn }); return () => {}; },
@@ -483,10 +484,10 @@ test("summary: events of one window are one line after 30 s, acked after it; not
   const h = harness({ pending: 0, window: 30 });
   const { done: p } = await summaryRun(h, [ev(1), ev(2)]);
   await tickAt(h, 29000);
-  assert.deepStrictEqual(h.out, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=0"]);
+  assert.deepStrictEqual(h.out, []); // decision 31: an armed watch with nothing waiting prints nothing
   assert.ok(!h.calls.some((c) => c.startsWith("ack")));
   await tickAt(h, 30000);
-  assert.strictEqual(h.out[1], "SUMMARY 2 events 2 entries\npr_merged a/b#1 delivery=D1\npr_merged a/b#2 delivery=D2");
+  assert.strictEqual(h.out[0], "SUMMARY 2 events 2 entries\npr_merged a/b#1 delivery=D1\npr_merged a/b#2 delivery=D2");
   assert.deepStrictEqual(h.calls.filter((c) => c !== "close").slice(-3), ["write:SUMMARY", "ack:1", "ack:2"]);
   h.ac.abort();
   assert.strictEqual(await p, 0);
@@ -497,9 +498,9 @@ test("summary: the window starts at its first event, not at the start of the wat
   h.clock = 50000;
   const { done: p } = await summaryRun(h, [ev(1)]);
   await tickAt(h, 75000);
-  assert.strictEqual(h.out.length, 1);
+  assert.strictEqual(h.out.length, 0);
   await tickAt(h, 80000);
-  assert.match(h.out[1], /^SUMMARY 1 event 1 entry\npr_merged a\/b#1/);
+  assert.match(h.out[0], /^SUMMARY 1 event 1 entry\npr_merged a\/b#1/);
   h.ac.abort();
   await p;
 });
@@ -520,7 +521,7 @@ test("summary: a watch that ends with a window open prints and acks nothing of i
   const { done: p } = await summaryRun(h, [ev(1)]);
   h.ac.abort();
   assert.strictEqual(await p, 0);
-  assert.strictEqual(h.out.length, 1);
+  assert.strictEqual(h.out.length, 0);
   assert.ok(!h.calls.some((c) => c.startsWith("ack")));
 });
 
@@ -620,7 +621,7 @@ test("ignore file: a label the dispatcher set in the last hour is acked, not pri
   const { done: p } = await summaryRun(h, [labeled(1, "status:running"), labeled(2, "status:planned"), labeled(3, "status:running", 5), ev(6)]);
   await tickAt(h, 4030000);
   // #4 status:running matches a key of the last hour; status:planned's key is older; #5 has no key.
-  assert.strictEqual(h.out[1], [
+  assert.strictEqual(h.out[0], [
     "SUMMARY 3 events 3 entries ignored=1",
     "pr_merged a/b#6 delivery=D6",
     "issue_labeled a/b#4 label=status:planned delivery=D2",
@@ -641,7 +642,7 @@ test("ignore file: a close the dispatcher made (decision 30) is acked, not print
   const { done: p } = await summaryRun(h, [closed(1), closed(2, 5), closed(3, 6)]);
   await tickAt(h, 4030000);
   // #4 matches a key of the last hour; #6's key is older; #5 has none.
-  assert.strictEqual(h.out[1], [
+  assert.strictEqual(h.out[0], [
     "SUMMARY 2 events 2 entries ignored=1",
     "issue_closed a/b#5 delivery=D2",
     "issue_closed a/b#6 delivery=D3",
@@ -657,7 +658,7 @@ test("ignore file: a window of only ignored events prints nothing and acks them"
   h.fs.files["/p/ignore"] = `${iso(0)} label a/b#4 needs review\n`;
   const { done: p } = await summaryRun(h, [labeled(1, "needs review")]);
   await tickAt(h, 30000);
-  assert.strictEqual(h.out.length, 1);
+  assert.strictEqual(h.out.length, 0);
   assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")), ["ack:1"]);
   h.ac.abort();
   await p;
@@ -694,7 +695,7 @@ test("ignore file: by the event's time, a line drops an echo from 60 s before it
     at(closed(4, 6), L + 2 * HOUR),
   ]);
   await tickAt(h, L + 3 * HOUR + 30000);
-  const [header, ...entries] = h.out[1].split("\n");
+  const [header, ...entries] = h.out[0].split("\n");
   assert.strictEqual(header, "SUMMARY 2 events 2 entries ignored=2");
   assert.deepStrictEqual(entries.sort(), ["issue_closed a/b#6 delivery=D4", "issue_labeled a/b#4 label=x delivery=D2"]);
   assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")).sort(), ["ack:1", "ack:2", "ack:3", "ack:4"]);
@@ -732,4 +733,27 @@ test("line: delivery is its first 8 characters; --json keeps the full id", () =>
   const m = msg({ signal: "pr_merged", repo: "a/b", pr: 1, delivery: "1f2e3d4c-5b6a-4789-90ab-cdef01234567" });
   assert.strictEqual(formatLine(m, false), "pr_merged a/b#1 delivery=1f2e3d4c");
   assert.strictEqual(JSON.parse(formatLine(m, true)).delivery, "1f2e3d4c-5b6a-4789-90ab-cdef01234567");
+});
+
+// Decision 31 (agent-config, Kade 2026-10-27): a watch that prints nothing is armed. WATCH-ARMED with
+// nothing waiting goes to the log (stderr), so a re-arm costs the dispatcher no turn; with a backlog
+// it stays on stdout, where the backlog's summary follows anyway. Every failure is BROKER-DOWN on stdout.
+test("armed: with unprocessed=0 WATCH-ARMED goes to the log, and stdout stays empty (decision 31)", async () => {
+  const h = harness({ pending: 0 });
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(h.out, []);
+  assert.deepStrictEqual(h.err, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=0"]);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+});
+
+test("armed: with a backlog WATCH-ARMED stays the first stdout line, not in the log (decision 31)", async () => {
+  const h = harness({ pending: 2 });
+  const p = open(h);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(h.out, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=2"]);
+  assert.deepStrictEqual(h.err, []);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
 });

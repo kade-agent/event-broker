@@ -230,6 +230,8 @@ async function run(d) {
     })();
   };
   // A line printed: false when stdout failed (the run ends with 3, and nothing is acked).
+  // A line for the log (stderr), never the session; a failing log is ignored.
+  const log = (line) => { try { if (d.log) d.log(line); } catch { /* the log is best effort */ } };
   const emit = async (line) => {
     if (ended) return false;
     try { await d.write(line); } catch { end(3); return false; }
@@ -309,7 +311,9 @@ async function run(d) {
     if (subjects.length !== 1 || subjects[0] !== `ev.${owner}.>`) { end(1, `BROKER-DOWN key is for another account (want ${owner})`); return; }
     const pending = await conn.pending();
     if (superseded()) { end(0); return; }
-    if (!(await emit(`WATCH-ARMED ${status(pending)}`))) return;
+    // Decision 31: a watch that prints nothing is armed. With nothing waiting the line goes to the log
+    // (stderr), not the session; with a backlog it stays on stdout, before the backlog's summary.
+    if (pending > 0) { if (!(await emit(`WATCH-ARMED ${status(pending)}`))) return; } else log(`WATCH-ARMED ${status(pending)}`);
     armed = true;
     backlog = pending;
 

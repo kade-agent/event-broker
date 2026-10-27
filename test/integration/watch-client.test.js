@@ -64,7 +64,7 @@ function watch(url, profile, dir) {
     while ((i = buf.indexOf("\n")) >= 0) { w.lines.push(buf.slice(0, i)); buf = buf.slice(i + 1); }
     for (const fn of w.waiters.splice(0)) fn();
   });
-  child.stderr.on("data", (d) => { w.err += d; });
+  child.stderr.on("data", (d) => { w.err += d; for (const fn of w.waiters.splice(0)) fn(); });
   w.exit = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
   // The next unread line, or null after ms with none.
   w.next = async (ms = TIMEOUT) => {
@@ -75,6 +75,18 @@ function watch(url, profile, dir) {
       await new Promise((r) => { const t = setTimeout(r, left); w.waiters.push(() => { clearTimeout(t); r(); }); });
     }
     return w.lines.shift();
+  };
+  // Decision 31: WATCH-ARMED is the first stdout line with a backlog, else a stderr line.
+  w.armed = async (ms = TIMEOUT) => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      if (w.lines[0] && w.lines[0].startsWith("WATCH-ARMED ")) return w.lines.shift();
+      const inErr = /^WATCH-ARMED .*$/m.exec(w.err);
+      if (inErr) return inErr[0];
+      const left = deadline - Date.now();
+      if (left <= 0) return null;
+      await new Promise((r) => { const t = setTimeout(r, left); w.waiters.push(() => { clearTimeout(t); r(); }); });
+    }
   };
   return w;
 }
@@ -101,7 +113,7 @@ for (const [label, url] of [["LAN", env.NATS_URL], ["websocket", env.NATS_WS_URL
       await publish(nc, repo, passed);
       await publish(nc, repo, message(repo, "review_approved"));
 
-      assert.match(await w.next(), new RegExp(`^WATCH-ARMED ${A} consumer=wc-${id} unprocessed=\\d+$`));
+      assert.match(await w.armed(), new RegExp(`^WATCH-ARMED ${A} consumer=wc-${id} unprocessed=\\d+$`));
       assert.strictEqual(await w.next(), `ci_passed ${A}/${repo}#1 branch=claude/x sha=9f2c1e0 delivery=${passed.delivery.slice(0, 8)}`); // decision 28
       assert.strictEqual(await w.next(1500), null, "the consumer filter must drop review_approved");
       assert.ok(await drained(jsm, `wc-${id}`), "the printed message must be acked");
@@ -129,7 +141,7 @@ test("watch.js: with stdout closed after WATCH-ARMED it exits 3 without acking, 
   let second;
   try {
     const jsm = await setup(nc, `wc-${id}`, repo);
-    assert.match(await first.next(), /^WATCH-ARMED /);
+    assert.match(await first.armed(), /^WATCH-ARMED /);
     first.child.stdout.destroy(); // the reader of its stdout is gone: the next write fails
     const m = message(repo, "ci_passed");
     await publish(nc, repo, m);
@@ -137,7 +149,7 @@ test("watch.js: with stdout closed after WATCH-ARMED it exits 3 without acking, 
 
     // Unacked: it comes back after the 2 s ack wait.
     second = watch(env.NATS_URL, `wc-${id}`, dir);
-    assert.match(await second.next(), /^WATCH-ARMED /);
+    assert.match(await second.armed(), /^WATCH-ARMED /);
     const line = await second.next();
     assert.ok(line && line.startsWith("ci_passed "), `got ${line}`);
     assert.ok(line.endsWith(`delivery=${m.delivery.slice(0, 8)}`)); // decision 28
