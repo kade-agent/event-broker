@@ -31,7 +31,8 @@ function adapter(nc, owner, profile) {
       if (!m) return null;
       let data = null;
       try { data = m.json(); } catch { /* the loop drops it */ }
-      return { seq: m.seq, data, ack: () => m.ackAck() };
+      // at: the stream's timestamp of the message, which the ignore file matches (event-broker#32).
+      return { seq: m.seq, data, at: m.time.getTime(), ack: () => m.ackAck() };
     },
     close: () => nc.close(),
   };

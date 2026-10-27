@@ -150,7 +150,7 @@ test("watch.js: with stdout closed after WATCH-ARMED it exits 3 without acking, 
   }
 });
 
-test("watch.js adapter: pending() asks the server each time, so WATCH-ALIVE does not repeat a stale count", { skip }, async () => {
+test("watch.js adapter: pending() asks the server each time, so WATCH-ALIVE does not repeat a stale count; next() carries the stream timestamp as at", { skip }, async () => {
   const id = randomUUID().slice(0, 8);
   const repo = `wc-pending-${id}`;
   const nc = await receiver();
@@ -162,6 +162,10 @@ test("watch.js adapter: pending() asks the server each time, so WATCH-ALIVE does
     await publish(nc, repo, message(repo, "ci_passed"));
     assert.strictEqual(await a.pending(), 1);
     assert.deepStrictEqual(await a.streamSubjects(), [`ev.${A}.>`]);
+    // event-broker#32 point 4: at is the stream's timestamp, which the ignore file matches.
+    const m = await a.next();
+    assert.ok(Math.abs(m.at - Date.now()) < 10000, `at ${m.at} is the publish time`);
+    await m.ack();
   } finally {
     await reader.close();
     await nc.close();
