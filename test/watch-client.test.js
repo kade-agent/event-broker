@@ -676,6 +676,42 @@ test("ignore file: a missing file drops nothing; with --window 0 a match is acke
   assert.deepStrictEqual(h2.calls.filter((c) => c.startsWith("ack")), ["ack:1", "ack:2"]);
 });
 
+// event-broker#32 point 4: a line matches on the event's own time (its stream timestamp, at), from
+// 60 s before the line to 1 h after it, however late the event is read.
+const L = 10000000;
+const HOUR = 3600000;
+const at = (m, ms) => ({ ...m, at: ms });
+
+test("ignore file: by the event's time, a line drops an echo from 60 s before it to 1 h after it, read 3 h later", async () => {
+  const h = harness({ pending: 0, window: 30 });
+  h.deps.settings.ignoreFile = "/p/ignore";
+  h.clock = L + 3 * HOUR; // a backlog read long after the dispatcher wrote its lines
+  h.fs.files["/p/ignore"] = `${iso(L)} label a/b#4 x\n${iso(L)} close a/b#5\n${iso(L)} close a/b#6\n`;
+  const { done: p } = await summaryRun(h, [
+    at(labeled(1, "x"), L - 30000), // the label set at the issue's creation, its line written after it
+    at(labeled(2, "x"), L - 90000), // a label from before the line: someone else's
+    at(closed(3, 5), L + 50 * 60000),
+    at(closed(4, 6), L + 2 * HOUR),
+  ]);
+  await tickAt(h, L + 3 * HOUR + 30000);
+  const [header, ...entries] = h.out[1].split("\n");
+  assert.strictEqual(header, "SUMMARY 2 events 2 entries ignored=2");
+  assert.deepStrictEqual(entries.sort(), ["issue_closed a/b#6 delivery=D4", "issue_labeled a/b#4 label=x delivery=D2"]);
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")).sort(), ["ack:1", "ack:2", "ack:3", "ack:4"]);
+  h.ac.abort();
+  await p;
+});
+
+test("ignore file: with --window 0 the event's time decides too", async () => {
+  const h = harness({ queue: [at(closed(1, 5), L + 10 * 60000), at(labeled(2, "x"), L + 2 * HOUR)] });
+  h.deps.settings.ignoreFile = "/p/ignore";
+  h.clock = L + 3 * HOUR;
+  h.fs.files["/p/ignore"] = `${iso(L)} close a/b#5\n${iso(L)} label a/b#4 x\n`;
+  await run(h.deps);
+  assert.deepStrictEqual(h.out.slice(1), ["issue_labeled a/b#4 label=x delivery=D2"]);
+  assert.deepStrictEqual(h.calls.filter((c) => c.startsWith("ack")), ["ack:1", "ack:2"]);
+});
+
 // ---- decision 28: quieter lines ----
 
 test("alive: without --alive the consumer info still runs every 600 s but prints nothing", async () => {

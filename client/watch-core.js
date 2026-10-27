@@ -144,20 +144,26 @@ function formatSummary(events, json, ignored = 0) {
 
 // Decision 26: the dispatcher appends `<ISO time> label <owner>/<repo>#<n> <label>` after each label
 // it sets, and (decision 30) `<ISO time> close <owner>/<repo>#<n>` after each sub-issue it closes.
-// The keys of the last hour; a missing or unreadable file gives none.
-const IGNORE_MS = 3600000;
-function ignoreKeys(fs, file, now) {
-  const keys = new Set();
+// event-broker#32 point 4: a line drops a matching event whose own time (`at`, its stream timestamp)
+// is from 60 s before the line to 1 h after it, however late the event is read, so neither the order
+// of the API call and the line nor a watch armed hours later lets an echo through. Each key maps to
+// its lines' times; a missing or unreadable file gives none.
+const IGNORE_BEFORE_MS = 60000;
+const IGNORE_AFTER_MS = 3600000;
+function ignoreKeys(fs, file) {
+  const keys = new Map();
   const text = file ? readOrNull(fs, file) : null;
   for (const raw of String(text ?? "").split(/\r?\n/)) {
     const m = /^(\S+) (label \S+#\d+ .+|close \S+#\d+)$/.exec(raw.trim());
-    const at = m ? Date.parse(m[1]) : NaN;
-    if (!Number.isNaN(at) && now - at <= IGNORE_MS) keys.add(m[2]);
+    const t = m ? Date.parse(m[1]) : NaN;
+    if (!Number.isNaN(t)) keys.set(m[2], [...(keys.get(m[2]) || []), t]);
   }
   return keys;
 }
-const ignoredBy = (keys, m) => (m.signal === "issue_labeled" && keys.has(`label ${m.repo}#${m.issue} ${m.label}`))
-  || (m.signal === "issue_closed" && keys.has(`close ${m.repo}#${m.issue}`));
+const keyOf = (m) => (m.signal === "issue_labeled" ? `label ${m.repo}#${m.issue} ${m.label}`
+  : m.signal === "issue_closed" ? `close ${m.repo}#${m.issue}` : null);
+const ignoredBy = (keys, m, at) => (keys.get(keyOf(m)) || [])
+  .some((t) => at >= t - IGNORE_BEFORE_MS && at <= t + IGNORE_AFTER_MS);
 
 // Decision 21 (S3): watch.js --state's lines. The red line, then one line per PR snapshot by number,
 // null fields left out and values quoted as in an entry. --json: one object. Decision 27: only open
@@ -249,8 +255,8 @@ async function run(d) {
     batch = [];
     batchStart = null;
     if (!items.length) return;
-    const keys = ignoreKeys(d.fs, d.settings.ignoreFile, d.now());
-    const shown = items.filter((m) => !ignoredBy(keys, m.data));
+    const keys = ignoreKeys(d.fs, d.settings.ignoreFile);
+    const shown = items.filter((m) => !ignoredBy(keys, m.data, m.at));
     if (shown.length && !(await emit(formatSummary(shown.map((m) => m.data), json, items.length - shown.length)))) return;
     for (const m of items) await ack(m);
   })().finally(() => { flushing = null; }));
@@ -321,8 +327,9 @@ async function run(d) {
       if (seen.has(m.seq)) { await ack(m); continue; }
       // Anything without a signal and a repo cannot be a line: drop it, or it would come back forever.
       const valid = m.data && m.data.signal && m.data.repo;
+      if (m.at == null) m.at = d.now(); // no stream timestamp: the time it was read
       if (windowMs === 0) {
-        const ignored = valid && ignoredBy(ignoreKeys(d.fs, d.settings.ignoreFile, d.now()), m.data);
+        const ignored = valid && ignoredBy(ignoreKeys(d.fs, d.settings.ignoreFile), m.data, m.at);
         if (valid && !ignored && !(await emit(formatLine(m.data, json)))) return;
         remember(m.seq);
         await ack(m);
