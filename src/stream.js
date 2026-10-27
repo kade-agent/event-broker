@@ -1,5 +1,5 @@
 "use strict";
-// Streams GITHUB (v1) and EVENTS (v2) with their durable consumers, and STATE (decision 19), in one
+// Streams GITHUB (v1) and EVENTS (v2) with their durable consumers, STATE (decision 19) and LEASE (decision 33), in one
 // owner's account (design sections 6 and 9),
 // created or updated when the receiver starts. Every account has the same names; the owner is in
 // the subjects.
@@ -69,6 +69,19 @@ const stateStreamFor = (owner) => ({
   max_msgs_per_subject: 1,
   max_age: 30 * 24 * 3600 * SECOND,
   max_bytes: 4 * 1024 * 1024,
+  discard: DiscardPolicy.Old,
+});
+
+// Decision 33: one reader per org. lease.<owner>.<profile> holds the watching session's id; the client
+// writes it by expected subject sequence, so two arms cannot both win, and 35 min (the 30-minute watch
+// deadline and a margin) ends a lease nobody renewed.
+const leaseStreamFor = (owner) => ({
+  name: "LEASE",
+  subjects: [`lease.${owner}.>`],
+  storage: StorageType.File,
+  max_msgs_per_subject: 1,
+  max_age: 35 * 60 * SECOND,
+  max_bytes: 1024 * 1024,
   discard: DiscardPolicy.Old,
 });
 
@@ -211,6 +224,7 @@ async function ensureStream(jsm, owner, log = console.error) {
   await upsertStream(events);
   for (const name of Object.keys(PROFILES)) await upsertConsumer(events.name, profileConsumerFor(o, name));
   await upsertStream(stateStreamFor(o));
+  await upsertStream(leaseStreamFor(o));
   // Informational only: a failed listing must not stop the receiver from starting.
   try {
     for await (const c of jsm.consumers.list(events.name)) {
@@ -219,5 +233,5 @@ async function ensureStream(jsm, owner, log = console.error) {
   } catch (e) { log(`${events.name}: consumer list failed: ${e.message}`); }
 }
 
-module.exports = { ensureStream, streamFor, consumerFor, eventsStreamFor, profileConsumerFor, stateStreamFor, stateKey, createStateStore,
+module.exports = { ensureStream, streamFor, consumerFor, eventsStreamFor, profileConsumerFor, stateStreamFor, leaseStreamFor, stateKey, createStateStore,
   createPrSnapshots, withSnapshots };
