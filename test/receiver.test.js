@@ -2,13 +2,13 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const crypto = require("node:crypto");
-const { createReceiver } = require("../src/receiver");
+const { createReceiver, parseMainInfo } = require("../src/receiver");
 
 const secret = "hook-secret";
 const repository = { full_name: "stella-rain/app", default_branch: "main", owner: { login: "stella-rain" } };
 const pr = { number: 7, merged: true, draft: false, auto_merge: null, head: { ref: "claude/t", sha: "s" } };
 
-async function start({ publish, onTrigger = () => {}, state } = {}) {
+async function start({ publish, onTrigger = () => {}, state, mainInfo } = {}) {
   const published = [];
   const triggers = [];
   const logs = [];
@@ -19,6 +19,7 @@ async function start({ publish, onTrigger = () => {}, state } = {}) {
     log: (line) => logs.push(line),
     allowedOwners: ["stella-rain"],
     state,
+    mainInfo,
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -109,6 +110,25 @@ test("a second green run of a workflow on main is main_still_passed in v2; v1 is
     ]);
     assert.strictEqual(s.published[3].event.signal, "main_still_passed");
   } finally { await s.close(); }
+});
+
+test("decision 32: a run on main of a workflow in mainInfo is main_info in v2; v1 is unchanged", async () => {
+  const s = await start({ mainInfo: ["stella-rain/app:Rust"] });
+  try {
+    await deliver(s.base, "workflow_run", mainRun("failure"), { delivery: "r1" });
+    assert.deepStrictEqual(s.published.map((p) => p.subject), [
+      "github.stella-rain.app.branch.main.workflow_run", "ev.stella-rain.app.branch.main.main_info",
+    ]);
+    assert.strictEqual(s.published[1].event.conclusion, "failure");
+  } finally { await s.close(); }
+});
+
+test("parseMainInfo reads MAIN_INFO_WORKFLOWS: comma-separated <owner>/<repo>:<workflow name>, names may hold spaces", () => {
+  assert.deepStrictEqual(parseMainInfo(undefined), []);
+  assert.deepStrictEqual(parseMainInfo(""), []);
+  assert.deepStrictEqual(parseMainInfo(" stella-rain/app:Core bump , kade-agent/x:CI "), ["stella-rain/app:Core bump", "kade-agent/x:CI"]);
+  assert.throws(() => parseMainInfo("stella-rain/app"), /MAIN_INFO_WORKFLOWS/);
+  assert.throws(() => parseMainInfo("app:Core bump"), /MAIN_INFO_WORKFLOWS/);
 });
 
 test("decision 19: a restarted receiver with the same state store remembers a green workflow", async () => {
