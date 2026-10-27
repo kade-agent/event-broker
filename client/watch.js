@@ -4,8 +4,9 @@
 //   node client/watch.js --owner <org> [--profile dispatcher] [--json] [--window 30] [--alive]
 //   node client/watch.js --owner <org> --state <org>/<repo> [--json] [--all]   (prints STATE and exits; decisions 21, 27)
 // Run it as a Claude Code Monitor command. Its output is a SUMMARY of a 30 s window (a header line,
-// then one entry per line; one line per event with --window 0), WATCH-ARMED, WATCH-ALIVE (with
-// --alive) or BROKER-DOWN. The logic is in watch-core.js; this file only wires the real NATS connection.
+// then one entry per line; one line per event with --window 0), WATCH-ARMED (on stderr when nothing
+// waits: decision 31), WATCH-ALIVE (with --alive) or BROKER-DOWN. The logic is in watch-core.js;
+// this file only wires the real NATS connection.
 const fs = require("node:fs");
 const os = require("node:os");
 const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");
@@ -80,6 +81,7 @@ async function main() {
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => ac.abort());
   // A closed stdout reports through the write callback; the stream's own 'error' must not crash us.
   process.stdout.on("error", () => {});
+  process.stderr.on("error", () => {}); // the log is best effort (decision 31)
 
   const seed = new TextEncoder().encode(fs.readFileSync(settings.keyFile, "utf8").trim());
   const open = async (hooks) => {
@@ -98,6 +100,7 @@ async function main() {
     settings, fs, pid: process.pid, signal: ac.signal,
     connect: open,
     write: (line) => new Promise((resolve, reject) => process.stdout.write(`${line}\n`, (e) => (e ? reject(e) : resolve()))),
+    log: (line) => process.stderr.write(`${line}\n`),
     now: Date.now,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     every: (ms, fn) => { const t = setInterval(fn, ms); return () => clearInterval(t); },
