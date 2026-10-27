@@ -32,8 +32,9 @@ function send(res, status, body = "") {
 }
 
 // state: the STATE store (decision 19); memory only when not given.
-function createReceiver({ secret, publish, onTrigger, allowedOwners, state = createStateStore(), log = console.error }) {
-  const mainRuns = createMainRuns({ store: state });
+// mainInfo: the MAIN_INFO_WORKFLOWS list (decision 32).
+function createReceiver({ secret, publish, onTrigger, allowedOwners, state = createStateStore(), mainInfo = [], log = console.error }) {
+  const mainRuns = createMainRuns({ store: state, mainInfo });
   const allowed = new Set(allowedOwners.map((o) => o.toLowerCase()));
   async function onDelivery(req, res) {
     let body;
@@ -95,6 +96,16 @@ function parseSeeds(text) {
   return seeds;
 }
 
+// MAIN_INFO_WORKFLOWS (decision 32): "<owner>/<repo>:<workflow name>,..." -> the entries; a name may
+// hold spaces, not a comma. Empty or unset is none.
+function parseMainInfo(text) {
+  const list = String(text || "").split(",").map((w) => w.trim()).filter(Boolean);
+  for (const w of list) {
+    if (!/^[^/:\s]+\/[^/:\s]+:.+$/.test(w)) throw new Error(`MAIN_INFO_WORKFLOWS: "${w}" is not <owner>/<repo>:<workflow name>`);
+  }
+  return list;
+}
+
 // publish(subject, event, msgID) through the connection of the event's owner (event.repo before "/").
 // publishers: { owner: (subject, event, msgID) => Promise }.
 function publisherFor(publishers) {
@@ -131,6 +142,7 @@ function stateBackend(accounts) {
 async function main() {
   const allowedOwners = (process.env.ALLOWED_OWNERS || "").split(",").map((o) => o.trim()).filter(Boolean);
   if (!allowedOwners.length) throw new Error("ALLOWED_OWNERS is not set");
+  const mainInfo = parseMainInfo(process.env.MAIN_INFO_WORKFLOWS);
   const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");
   const { jetstream, jetstreamManager } = require("@nats-io/jetstream");
   const { ensureStream } = require("./stream");
@@ -163,11 +175,11 @@ async function main() {
   if (!process.env.APP_ID) throw new Error("APP_ID is not set");
   const app = createApp({ appId: process.env.APP_ID, privateKey: fileSetting("APP_PRIVATE_KEY_FILE") });
   const watch = createMergeWatch({ gh: app, publish, store: state, snapshots });
-  const server = createReceiver({ secret: fileSetting("WEBHOOK_SECRET_FILE"), allowedOwners, publish, state, onTrigger: (t) => watch.handle(t) });
+  const server = createReceiver({ secret: fileSetting("WEBHOOK_SECRET_FILE"), allowedOwners, publish, state, mainInfo, onTrigger: (t) => watch.handle(t) });
   const port = Number(process.env.PORT || 8787);
   server.listen(port, () => console.log(`event-broker receiver on ${port}`));
 }
 
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
 
-module.exports = { createReceiver, parseSeeds, publisherFor };
+module.exports = { createReceiver, parseSeeds, parseMainInfo, publisherFor };
