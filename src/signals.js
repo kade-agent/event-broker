@@ -13,7 +13,7 @@ const SIGNALS = Object.freeze([
   "pr_merged", "pr_closed", "pr_ready", "pr_draft", "automerge_on", "automerge_off",
   ...MERGE_STATES.map((s) => `merge_${s}`), "merge_other",
   "ci_failed", "ci_passed", "ci_other",
-  "main_failed", "main_passed", "main_still_passed", "main_other",
+  "main_failed", "main_passed", "main_still_passed", "main_other", "main_info",
   "branch_failed", "branch_passed", "branch_other",
   "check_failed", "check_passed", "check_other",
   "review_changes", "review_comment", "review_approved", "review_dismissed", "review_other",
@@ -71,7 +71,13 @@ function v2Of(e, defaultBranch) {
 // state.<owner>.<repo>.main.<workflow> ({passed}), kept in STATE, so a restart repeats nothing.
 // Decision 20: each main event carries red, the sorted workflows failing on that repository's main
 // once it counts, kept as state.<owner>.<repo>.red ({red}) and updated one repository at a time.
-function createMainRuns({ store = createStateStore() } = {}) {
+// Decision 32: a run on main of a workflow in mainInfo (<owner>/<repo>:<name>) is main_info, whatever
+// its conclusion, with no red and no state.
+const MAIN_SIGNALS = new Set(["main_failed", "main_passed", "main_other"]);
+const infoKey = (repo, name) => `${String(repo).toLowerCase()}:${name}`;
+
+function createMainRuns({ store = createStateStore(), mainInfo = [] } = {}) {
+  const info = new Set(mainInfo.map((w) => { const i = w.indexOf(":"); return infoKey(w.slice(0, i), w.slice(i + 1)); }));
   const queues = new Map(); // red key -> the last update queued for it
   const serial = (k, fn) => {
     const next = (queues.get(k) || Promise.resolve()).then(fn);
@@ -86,6 +92,10 @@ function createMainRuns({ store = createStateStore() } = {}) {
   return {
     async apply(v2) {
       const { signal } = v2.event;
+      if (MAIN_SIGNALS.has(signal) && v2.event.check && info.has(infoKey(v2.event.repo, v2.event.check.name))) {
+        const subject = v2.subject.replace(/\.main_[a-z]+$/, ".main_info");
+        return { v2: { subject, event: { ...v2.event, signal: "main_info" } }, commit: async () => {} };
+      }
       if (signal !== "main_passed" && signal !== "main_failed") return { v2, commit: async () => {} };
       const failed = signal === "main_failed";
       const name = (v2.event.check && v2.event.check.name) || "_";

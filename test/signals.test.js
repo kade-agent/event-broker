@@ -54,13 +54,13 @@ test("every row of the design's signal table gets its signal", () => {
 });
 
 test("the table and createMainRuns cover every signal", () => {
-  // main_still_passed comes only from createMainRuns (design section 9, decision 16).
-  assert.deepStrictEqual(new Set([...ROWS.map(([, s]) => s), "main_still_passed"]), new Set(SIGNALS));
+  // main_still_passed (decision 16) and main_info (decision 32) come only from createMainRuns.
+  assert.deepStrictEqual(new Set([...ROWS.map(([, s]) => s), "main_still_passed", "main_info"]), new Set(SIGNALS));
 });
 
-test("SIGNALS is the frozen list of 39 unique [a-z_] names", () => {
-  assert.strictEqual(SIGNALS.length, 39);
-  assert.strictEqual(new Set(SIGNALS).size, 39);
+test("SIGNALS is the frozen list of 40 unique [a-z_] names", () => {
+  assert.strictEqual(SIGNALS.length, 40);
+  assert.strictEqual(new Set(SIGNALS).size, 40);
   assert.ok(Object.isFrozen(SIGNALS));
   for (const s of SIGNALS) assert.match(s, /^[a-z_]+$/);
 });
@@ -234,4 +234,41 @@ test("red: other signals, main_other included, carry no red", async () => {
   assert.strictEqual((await apply1(runs, mainRun("cancelled"))).event.red, undefined);
   const pr = v2Of(ev({ event: "workflow_run", conclusion: "failure", pr: 3, branch: "claude/x" }), "main");
   assert.strictEqual((await apply1(runs, pr)).event.red, undefined);
+});
+
+// Decision 32: a listed workflow's run on main is main_info, whatever its result, and never red.
+test("main_info: a listed workflow's run on main is main_info with its conclusion, whatever the result", async () => {
+  const runs = createMainRuns({ mainInfo: ["stella-rain/core:Core bump"] });
+  for (const c of ["failure", "success", "cancelled"]) {
+    const v2 = await apply1(runs, mainRun(c, "Core bump"));
+    assert.strictEqual(v2.subject, "ev.stella-rain.core.branch.main.main_info");
+    assert.strictEqual(v2.event.signal, "main_info");
+    assert.strictEqual(v2.event.conclusion, c);
+    assert.strictEqual(v2.event.red, undefined);
+  }
+});
+
+test("main_info: a listed workflow never enters red nor its own main state", async () => {
+  const values = {};
+  const backend = { read: async (k) => values[k] ?? null, write: async (k, v) => { values[k] = v; }, log: () => {} };
+  const runs = createMainRuns({ store: createStateStore(backend), mainInfo: ["stella-rain/core:Core bump"] });
+  await apply1(runs, mainRun("failure", "Core bump"));
+  assert.deepStrictEqual(values, {});
+  const rust = await apply1(runs, mainRun("failure", "Rust"));
+  assert.deepStrictEqual([rust.event.signal, rust.event.red], ["main_failed", ["Rust"]]);
+});
+
+test("main_info: the list is per repository, the owner and repository case-insensitive, the name exact", async () => {
+  const runs = createMainRuns({ mainInfo: ["Stella-Rain/Core:Core bump"] });
+  assert.strictEqual((await apply1(runs, mainRun("failure", "Core bump"))).event.signal, "main_info");
+  assert.strictEqual((await apply1(runs, mainRun("failure", "Core bump", "stella-rain/app"))).event.signal, "main_failed");
+  assert.strictEqual((await apply1(runs, mainRun("failure", "core bump"))).event.signal, "main_failed");
+});
+
+test("main_info: a listed workflow on a branch or a PR keeps its signal", async () => {
+  const runs = createMainRuns({ mainInfo: ["stella-rain/app:Core bump"] });
+  const branch = v2Of(ev({ event: "workflow_run", conclusion: "failure", branch: "claude/x", check: { name: "Core bump", url: null } }), "main");
+  const pr = v2Of(ev({ event: "workflow_run", conclusion: "failure", pr: 3, branch: "claude/x", check: { name: "Core bump", url: null } }), "main");
+  assert.strictEqual((await apply1(runs, branch)).event.signal, "branch_failed");
+  assert.strictEqual((await apply1(runs, pr)).event.signal, "ci_failed");
 });

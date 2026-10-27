@@ -49,6 +49,7 @@ All of them come from the environment. Secrets are files outside git.
 | `APP_PRIVATE_KEY_FILE` | (required) | the App's private key (PEM) |
 | `NATS_URL` | `nats://nats:4222` | the NATS server, inside compose |
 | `ALLOWED_OWNERS` | (required) | owners whose deliveries are accepted, comma-separated; one NATS account each |
+| `MAIN_INFO_WORKFLOWS` | (empty) | `<owner>/<repo>:<workflow name>`, comma-separated: runs on main published as `main_info`, never red (design decision 32) |
 | `NATS_NKEY_SEEDS_FILE` | (required) | the `receiver-<owner>` seeds, one `<owner> <seed>` line per allowed owner |
 | `PORT` | `8787` | listen port behind the NAS reverse proxy (TLS there) |
 
