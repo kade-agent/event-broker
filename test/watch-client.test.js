@@ -25,8 +25,8 @@ const resolve = (over = {}) => resolveSettings({ argv: ["--owner", "kade-agent"]
 const fatal = (code, re) => (e) => e instanceof Fatal && e.exitCode === code && re.test(e.message);
 
 test("arguments: --owner, --profile, --json and --window", () => {
-  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0, state: undefined, all: false, alive: false });
-  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30, state: undefined, all: false, alive: false });
+  assert.deepStrictEqual(parseArgs(["--owner", "a", "--profile", "all", "--json", "--window", "0"]), { owner: "a", profile: "all", json: true, window: 0, state: undefined, all: false, alive: false, session: undefined, take: false });
+  assert.deepStrictEqual(parseArgs([]), { owner: undefined, profile: undefined, json: false, window: 30, state: undefined, all: false, alive: false, session: undefined, take: false });
   assert.strictEqual(parseArgs(["--state", "kade-agent/x"]).state, "kade-agent/x");
   assert.throws(() => parseArgs(["--state"]), fatal(2, /--state/));
   assert.throws(() => parseArgs(["--state", "no-slash"]), fatal(2, /--state/));
@@ -190,15 +190,25 @@ const ev = (seq, over = {}) => ({ seq, data: msg({ signal: "pr_merged", repo: "a
 // queue items: a message, null (a quiet minute) or an Error (a failed pull). When it runs dry the
 // harness aborts the run, and the pull never resolves (the real one would block for a minute).
 // window 0: one line per event, as the tests before decision 17 expect; the summary tests pass 30.
-function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owner = "kade-agent", writeFails = false, connectFails = 0, pidText = "4242\n", window = 0 } = {}) {
-  const h = { out: [], err: [], calls: [], clock: 0, ticks: [], queue: [...queue], connects: 0, nexts: 0, sleeps: [] };
+// lease: what conn.lease() reads ({ holder, seq, at } or null); session and take: --session, --take
+// (decision 33); conflicts: lease values another arm writes first, one per conflicting claim.
+function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owner = "kade-agent", writeFails = false, connectFails = 0, pidText = "4242\n", window = 0,
+  lease = null, session, take = false, conflicts = [], leaseFails = false } = {}) {
+  const h = { out: [], err: [], calls: [], clock: 0, ticks: [], queue: [...queue], connects: 0, nexts: 0, sleeps: [], lease, claims: [], conflicts: [...conflicts], leaseReads: 0, order: [] };
   const ac = new AbortController();
   const fs = fakeFs({ "/p/watch.pid": pidText });
   h.fs = fs;
   h.ac = ac;
   const conn = {
     streamSubjects: async () => subjects,
-    pending: async () => pending,
+    pending: async () => { h.order.push("pending"); return pending; },
+    lease: async () => { h.leaseReads++; if (leaseFails) throw new Error("timeout"); return h.lease; },
+    claim: async (id, seq) => {
+      h.claims.push([id, seq]);
+      h.order.push("claim");
+      if (h.conflicts.length) { h.lease = h.conflicts.shift(); throw Object.assign(new Error("wrong last sequence"), { conflict: true }); }
+      h.lease = { holder: id, seq: (h.lease ? h.lease.seq : 0) + 1, at: h.clock };
+    },
     next: async () => {
       h.nexts++;
       if (h.queue.length === 0) { ac.abort(); return new Promise(() => {}); }
@@ -210,7 +220,7 @@ function harness({ queue = [], subjects = ["ev.kade-agent.>"], pending = 3, owne
   };
   h.conn = conn;
   h.deps = {
-    settings: { owner, profile: "dispatcher", json: false, window, pidFile: "/p/watch.pid" },
+    settings: { owner, profile: "dispatcher", json: false, window, pidFile: "/p/watch.pid", session, take },
     connect: async (hooks) => {
       h.hooks = hooks;
       if (h.connects++ < connectFails) throw new Error("connect refused");
@@ -754,6 +764,94 @@ test("armed: with a backlog WATCH-ARMED stays the first stdout line, not in the 
   for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
   assert.deepStrictEqual(h.out, ["WATCH-ARMED kade-agent consumer=dispatcher unprocessed=2"]);
   assert.deepStrictEqual(h.err, []);
+  h.ac.abort();
+  assert.strictEqual(await p, 0);
+});
+
+// Decision 33 (agent-config, Kade 2026-10-27, "lease"; B: a stream, no new dependency): one reader per
+// org. With --session the watch holds lease.<owner>.<profile> on stream LEASE (35 min), taken after the
+// stream check and before anything is read; a live lease of another session ends it with WATCH-REFUSED.
+const MIN = 60000;
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+
+test("arguments: --session <id> and the --take flag; --take needs --session (exit 2)", () => {
+  assert.strictEqual(parseArgs(["--session", "session_01A"]).session, "session_01A");
+  assert.strictEqual(parseArgs(["--take"]).take, true);
+  assert.throws(() => parseArgs(["--session"]), fatal(2, /--session/));
+  const s = resolve({ argv: ["--owner", "kade-agent", "--session", "session_01A", "--take"] });
+  assert.deepStrictEqual([s.session, s.take], ["session_01A", true]);
+  assert.throws(() => resolve({ argv: ["--owner", "kade-agent", "--take"] }), fatal(2, /--take needs --session/));
+});
+
+test("lease: without --session nothing is read or written", async () => {
+  const h = harness({ pending: 1 });
+  await run(h.deps);
+  assert.deepStrictEqual([h.leaseReads, h.claims], [0, []]);
+  assert.strictEqual(h.out[0], "WATCH-ARMED kade-agent consumer=dispatcher unprocessed=1");
+});
+
+test("lease: absent -> created (expected sequence 0) before the consumer is read, then the watch arms", async () => {
+  const h = harness({ pending: 1, session: "s1" });
+  await run(h.deps);
+  assert.deepStrictEqual(h.claims, [["s1", 0]]);
+  assert.deepStrictEqual(h.order.slice(0, 2), ["claim", "pending"], "the claim comes before the consumer info");
+  assert.strictEqual(h.out[0], "WATCH-ARMED kade-agent consumer=dispatcher unprocessed=1");
+});
+
+test("lease: its own live lease is renewed by its sequence", async () => {
+  const h = harness({ pending: 1, session: "s1", lease: { holder: "s1", seq: 7, at: -20 * MIN } });
+  await run(h.deps);
+  assert.deepStrictEqual(h.claims, [["s1", 7]]);
+  assert.match(h.out[0], /^WATCH-ARMED /);
+});
+
+test("lease: another session's live lease -> WATCH-REFUSED holder=<id> on stdout, exit 4, nothing read", async () => {
+  const h = harness({ queue: [ev(1)], session: "s1", lease: { holder: "s2", seq: 7, at: -34 * MIN } });
+  assert.strictEqual(await run(h.deps), 4);
+  assert.deepStrictEqual(h.out, ["WATCH-REFUSED holder=s2"]);
+  assert.deepStrictEqual(h.claims, []);
+  assert.deepStrictEqual([h.nexts, h.order], [0, []]);
+});
+
+test("lease: another session's lease older than 35 min has expired and is taken by its sequence", async () => {
+  const h = harness({ pending: 1, session: "s1", lease: { holder: "s2", seq: 7, at: -36 * MIN } });
+  await run(h.deps);
+  assert.deepStrictEqual(h.claims, [["s1", 7]]);
+  assert.match(h.out[0], /^WATCH-ARMED /);
+});
+
+test("lease: --take overwrites another session's live lease", async () => {
+  const h = harness({ pending: 1, session: "s1", take: true, lease: { holder: "s2", seq: 7, at: 0 } });
+  await run(h.deps);
+  assert.deepStrictEqual(h.claims, [["s1", 7]]);
+  assert.match(h.out[0], /^WATCH-ARMED /);
+});
+
+test("lease: two arms at once, only one wins: a claim that loses reads again and is refused", async () => {
+  const h = harness({ session: "s1", conflicts: [{ holder: "s2", seq: 1, at: 0 }] });
+  assert.strictEqual(await run(h.deps), 4);
+  assert.deepStrictEqual(h.claims, [["s1", 0]]);
+  assert.deepStrictEqual(h.out, ["WATCH-REFUSED holder=s2"]);
+});
+
+test("lease: a lost race to its own id (a re-arm of the same session) is claimed again and arms", async () => {
+  const h = harness({ pending: 1, session: "s1", conflicts: [{ holder: "s1", seq: 1, at: 0 }] });
+  await run(h.deps);
+  assert.deepStrictEqual(h.claims, [["s1", 0], ["s1", 1]]);
+  assert.match(h.out[0], /^WATCH-ARMED /);
+});
+
+test("lease: a failing lease read is BROKER-DOWN, exit 1", async () => {
+  const h = harness({ session: "s1", leaseFails: true });
+  assert.strictEqual(await run(h.deps), 1);
+  assert.deepStrictEqual(h.out, ["BROKER-DOWN lease: timeout"]);
+});
+
+test("lease: a watch armed quietly with a lease still prints nothing on stdout", async () => {
+  const h = harness({ pending: 0, session: "s1" });
+  const p = run(h.deps);
+  await settle();
+  assert.deepStrictEqual(h.out, []);
   h.ac.abort();
   assert.strictEqual(await p, 0);
 });

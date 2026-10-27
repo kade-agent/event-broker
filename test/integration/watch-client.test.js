@@ -50,8 +50,8 @@ const publish = (nc, repo, m) => jetstream(nc).publish(`ev.${A}.${repo}.pr.1.${m
 
 // Spawns the client with the reader seed in the environment only (it writes its own key file).
 // --window 0: one line per event, which these checks read; the summary has unit tests.
-function watch(url, profile, dir) {
-  const child = spawn(process.execPath, [WATCH, "--owner", A, "--profile", profile, "--window", "0"], {
+function watch(url, profile, dir, extra = []) {
+  const child = spawn(process.execPath, [WATCH, "--owner", A, "--profile", profile, "--window", "0", ...extra], {
     env: { PATH: env.PATH, HOME: dir, EVENT_BROKER_URL: url, EVENT_BROKER_CLOUD_SEED: env.READER_SEED_A,
       EVENT_BROKER_NKEY_FILE: path.join(dir, "reader.nk"), WATCH_PIDFILE: path.join(dir, "watch.pid") },
     stdio: ["ignore", "pipe", "pipe"],
@@ -181,6 +181,38 @@ test("watch.js adapter: pending() asks the server each time, so WATCH-ALIVE does
   } finally {
     await reader.close();
     await nc.close();
+  }
+});
+
+// Decision 33: one reader per org. Each watch has its own home (its own pidfile), as two sessions would.
+test("watch.js --session: a second session is refused while the first holds the lease, --take takes it; the reader writes only its own lease", { skip }, async () => {
+  const id = randomUUID().slice(0, 8);
+  const dirs = [0, 1, 2].map(() => fs.mkdtempSync(path.join(os.tmpdir(), "watch-lease-")));
+  const nc = await receiver();
+  const reader = await connect({ servers: env.NATS_URL, authenticator: nkeyAuthenticator(new TextEncoder().encode(env.READER_SEED_A)), timeout: 3000, reconnect: false });
+  const ws = [];
+  try {
+    await setup(nc, `wc-${id}`, `wc-lease-${id}`);
+    ws.push(watch(env.NATS_URL, `wc-${id}`, dirs[0], ["--session", `s1-${id}`]));
+    assert.match(await ws[0].armed(), /^WATCH-ARMED /);
+
+    ws.push(watch(env.NATS_URL, `wc-${id}`, dirs[1], ["--session", `s2-${id}`]));
+    assert.strictEqual(await ws[1].next(), `WATCH-REFUSED holder=s1-${id}`);
+    assert.deepStrictEqual(await ws[1].exit, { code: 4, signal: null });
+
+    ws.push(watch(env.NATS_URL, `wc-${id}`, dirs[2], ["--session", `s2-${id}`, "--take"]));
+    assert.match(await ws[2].armed(), /^WATCH-ARMED /);
+    const held = await (await jetstreamManager(reader)).streams.getMessage("LEASE", { last_by_subj: `lease.${A}.wc-${id}` });
+    assert.strictEqual(held.json().session, `s2-${id}`);
+
+    // The reader may write only lease.<its owner>.> and may not purge or delete LEASE.
+    await assert.rejects(jetstream(reader).publish(`lease.stella-rain.wc-${id}`, "{}", { timeout: 2000 }));
+    await assert.rejects((await jetstreamManager(reader)).streams.purge("LEASE"));
+  } finally {
+    for (const w of ws) w.child.kill("SIGKILL");
+    await reader.close();
+    await nc.close();
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
   }
 });
 
