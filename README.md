@@ -83,6 +83,9 @@ on that PR. A push to the default branch starts one on every open PR on that bas
    `pr-watch.md`). It prints one event per line, and `BROKER-DOWN <why>` when it gives up.
    - One dispatcher per org, each with its own org's `reader-<owner>` key; there is no keyless
      access. A reader sees only its own account's stream and consumer.
+   - With `--session <id>` the client holds its org's lease (stream `LEASE`, 35 minutes, renewed on
+     each arm; design decision 33): a second session is refused with `WATCH-REFUSED holder=<id>`
+     and exit 4 before it reads anything. `--take` overrides a live lease, only on Kade's word.
    - **Local:** `EVENT_BROKER_URL=nats://<LAN address>:4222`, `EVENT_BROKER_NKEY_FILE` (the key file)
      and `EVENT_BROKER_CLOUD_SEED` (the line in `secrets/reader_<owner>_seed`). On Windows:
      - install `nats.exe` from the natscli releases (`nats-0.5.0-windows-amd64.zip`) and put
