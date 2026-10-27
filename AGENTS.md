@@ -26,7 +26,7 @@ overrides them.
 | `src/mergeable.js` | after a trigger: reads `mergeable_state` past `unknown`, publishes on change |
 | `src/receiver.js` | `node:http`: `POST /github`, `GET /healthz`; wiring and settings |
 | `nats/nats-server.conf` | JetStream, one account per allowed owner with its receiver and reader users (design section 7) |
-| `src/stream.js` | creates or updates, per owner, stream `GITHUB` and consumer `dispatcher` (8 filter_subjects) at start |
+| `src/stream.js` | creates or updates, per owner, streams `GITHUB`, `EVENTS`, `STATE` and `LEASE` (decision 33) and their consumers at start |
 | `scripts/setup.js` | `docker compose run --rm setup`: .env, a receiver and a reader NKey pair per owner, secrets and their owners |
 | `scripts/nkey.js` | prints a new NKey: seed (secret) and public key |
 | `client/watch.sh` | the dispatcher's watch (agent-config `pr-watch.md`): the consumer loop, the pidfile, the cloud seed |

@@ -13,13 +13,14 @@ class Fatal extends Error {
 }
 
 function parseArgs(argv) {
-  const out = { owner: undefined, profile: undefined, json: false, window: 30, state: undefined, all: false, alive: false };
+  const out = { owner: undefined, profile: undefined, json: false, window: 30, state: undefined, all: false, alive: false, session: undefined, take: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") out.json = true;
     else if (a === "--all") out.all = true; // decision 27
     else if (a === "--alive") out.alive = true; // decision 28
-    else if (a === "--owner" || a === "--profile" || a === "--window" || a === "--state") {
+    else if (a === "--take") out.take = true; // decision 33
+    else if (a === "--owner" || a === "--profile" || a === "--window" || a === "--state" || a === "--session") {
       if (i + 1 >= argv.length) throw new Fatal(`${a} needs a value`, 2);
       out[a.slice(2)] = argv[++i];
     } else throw new Fatal(`unknown argument ${a}`, 2);
@@ -65,6 +66,7 @@ function resolveSettings({ argv, env, home, fs, platform }) {
   const owner = (args.owner || get("EVENT_BROKER_OWNER") || "").toLowerCase();
   if (!owner) throw new Fatal("no owner: pass --owner <org> or set EVENT_BROKER_OWNER", 2);
 
+  if (args.take && !args.session) throw new Fatal("--take needs --session <id>", 2);
   if (args.state && args.state.split("/")[0].toLowerCase() !== owner) {
     throw new Fatal(`--state ${args.state} is not in ${owner}'s account`, 2);
   }
@@ -85,6 +87,7 @@ function resolveSettings({ argv, env, home, fs, platform }) {
 
   return {
     owner, url, keyFile, json: args.json, window: args.window, state: args.state, all: args.all, alive: args.alive,
+    session: args.session, take: args.take,
     profile: args.profile || "dispatcher",
     pidFile: get("WATCH_PIDFILE") || path.join(dir, `watch-${owner}.pid`),
     ignoreFile: get("WATCH_IGNOREFILE") || path.join(dir, `ignore-${owner}`), // decision 26
@@ -187,6 +190,21 @@ function formatState({ repo, red, prs }, json, all = false) {
   return [`STATE ${repo} red=${red.length ? quote(red.join(",")) : "-"}`, ...sorted.map(line)];
 }
 
+// Decision 33: one reader per org. The lease names the session watching; another session's lease
+// written in the last 35 min is live. A claim is written by the expected subject sequence (0: none),
+// so of two arms at once one fails with conflict and reads again. Resolves to the live holder that
+// refuses this session, or null once the lease is this session's. take: overwrite a live lease.
+const LEASE_MS = 35 * 60000;
+async function takeLease(conn, session, take, now) {
+  for (let attempt = 0; ; attempt++) {
+    const cur = await conn.lease();
+    if (cur && cur.holder !== session && now - cur.at < LEASE_MS && !take) return cur.holder;
+    try { await conn.claim(session, cur ? cur.seq : 0); return null; } catch (e) {
+      if (!e.conflict || attempt >= 1) throw e;
+    }
+  }
+}
+
 const SEEN_MAX = 1000; // stream sequences remembered, to ack a redelivery without printing it again
 const ALIVE_MS = 600000; // quiet this long -> a consumer info, printed as WATCH-ALIVE with --alive
 const DOWN_MS = 120000; // disconnected for longer than this -> BROKER-DOWN
@@ -194,8 +212,10 @@ const TICK_MS = 5000; // parent, disconnect and heartbeat checks
 const CONNECT_RETRY_MS = 5000;
 const PULL_RETRY_MS = 1000;
 
-// The watch. Resolves to the exit code: 0 a quiet end, 1 BROKER-DOWN, 2 settings, 3 a failed write.
-// deps: settings {owner, profile, json, window (s, 0 = a line per event), pidFile}; connect(hooks) -> conn {streamSubjects(), pending(),
+// The watch. Resolves to the exit code: 0 a quiet end, 1 BROKER-DOWN, 2 settings, 3 a failed write,
+// 4 WATCH-REFUSED (another session holds the lease: decision 33).
+// deps: settings {owner, profile, json, window (s, 0 = a line per event), pidFile, session, take}; connect(hooks) -> conn {streamSubjects(), pending(),
+// lease() -> {holder, seq, at} | null, claim(session, seq) (rejects with conflict: true on a lost race),
 // next() -> {seq, data, ack()} | null, close()}, with hooks {disconnected(), reconnected()};
 // write(line) (rejects on failure); now(); sleep(ms); every(ms, fn) -> cancel; checkParent() (throws
 // when the parent is gone); fs; pid; signal (an AbortSignal: SIGINT, SIGTERM, SIGHUP).
@@ -309,6 +329,11 @@ async function run(d) {
 
     const subjects = await conn.streamSubjects();
     if (subjects.length !== 1 || subjects[0] !== `ev.${owner}.>`) { end(1, `BROKER-DOWN key is for another account (want ${owner})`); return; }
+    if (d.settings.session) {
+      let holder;
+      try { holder = await takeLease(conn, d.settings.session, d.settings.take, d.now()); } catch (e) { down(`lease: ${e.message}`); return; }
+      if (holder) { end(4, `WATCH-REFUSED holder=${holder}`); return; }
+    }
     const pending = await conn.pending();
     if (superseded()) { end(0); return; }
     // Decision 31: a watch that prints nothing is armed. With nothing waiting the line goes to the log

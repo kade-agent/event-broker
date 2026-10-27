@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 "use strict";
 // The dispatcher's PR watch (agent-config docs/event-broker-design.md, section 9; pr-watch.md there):
-//   node client/watch.js --owner <org> [--profile dispatcher] [--json] [--window 30] [--alive]
+//   node client/watch.js --owner <org> [--profile dispatcher] [--json] [--window 30] [--alive] [--session <id> [--take]]
 //   node client/watch.js --owner <org> --state <org>/<repo> [--json] [--all]   (prints STATE and exits; decisions 21, 27)
 // Run it as a Claude Code Monitor command. Its output is a SUMMARY of a 30 s window (a header line,
 // then one entry per line; one line per event with --window 0), WATCH-ARMED (on stderr when nothing
-// waits: decision 31), WATCH-ALIVE (with --alive) or BROKER-DOWN. The logic is in watch-core.js;
+// waits: decision 31), WATCH-ALIVE (with --alive), WATCH-REFUSED (another session holds the lease:
+// decision 33, exit 4) or BROKER-DOWN. The logic is in watch-core.js;
 // this file only wires the real NATS connection.
 const fs = require("node:fs");
 const os = require("node:os");
 const { connect, nkeyAuthenticator } = require("@nats-io/transport-node");
 const { wsconnect } = require("@nats-io/nats-core");
-const { jetstream, jetstreamManager } = require("@nats-io/jetstream");
+const { jetstream, jetstreamManager, JetStreamApiCodes } = require("@nats-io/jetstream");
 const { Fatal, resolveSettings, run, formatState } = require("./watch-core");
 const { token } = require("../src/normalize");
 
@@ -19,6 +20,7 @@ const PULL_MS = 60000;
 
 function adapter(nc, owner, profile) {
   let consumer;
+  const leaseSubject = `lease.${owner}.${token(profile)}`;
   const getConsumer = async () => (consumer ??= await jetstream(nc).consumers.get("EVENTS", profile));
   return {
     async streamSubjects() {
@@ -34,6 +36,22 @@ function adapter(nc, owner, profile) {
       try { data = m.json(); } catch { /* the loop drops it */ }
       // at: the stream's timestamp of the message, which the ignore file matches (event-broker#32).
       return { seq: m.seq, data, at: m.time.getTime(), ack: () => m.ackAck() };
+    },
+    // Decision 33: lease.<owner>.<profile> on stream LEASE, its stream timestamp as at.
+    async lease() {
+      const m = await (await jetstreamManager(nc)).streams.getMessage("LEASE", { last_by_subj: leaseSubject });
+      if (!m) return null;
+      let holder = null;
+      try { holder = m.json().session ?? null; } catch { /* unreadable: a holder nobody can be */ }
+      return { holder, seq: m.seq, at: m.time.getTime() };
+    },
+    async claim(session, seq) {
+      try {
+        await jetstream(nc).publish(leaseSubject, JSON.stringify({ session, at: new Date().toISOString() }), { expect: { lastSubjectSequence: seq } });
+      } catch (e) {
+        if (e.code === JetStreamApiCodes.StreamWrongLastSequence) e.conflict = true;
+        throw e;
+      }
     },
     close: () => nc.close(),
   };

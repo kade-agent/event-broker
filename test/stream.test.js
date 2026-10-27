@@ -3,7 +3,7 @@ const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
-const { ensureStream, streamFor, eventsStreamFor, profileConsumerFor, stateStreamFor, stateKey, createStateStore,
+const { ensureStream, streamFor, eventsStreamFor, profileConsumerFor, stateStreamFor, leaseStreamFor, stateKey, createStateStore,
   createPrSnapshots, withSnapshots } = require("../src/stream");
 
 // A jsm that records what it was asked, and knows only what was added.
@@ -74,22 +74,22 @@ test("an existing consumer is updated, not added", async () => {
   assert.ok(!jsm.calls.some((c) => c[0] === "consumers.add"));
 });
 
-test("ensureStream adds GITHUB, its dispatcher, EVENTS, the dispatcher and all profiles, and STATE", async () => {
+test("ensureStream adds GITHUB, its dispatcher, EVENTS, the dispatcher and all profiles, STATE and LEASE", async () => {
   const jsm = fakeJsm();
   await ensureStream(jsm, "stella-rain");
   assert.deepStrictEqual(jsm.calls.map((c) => c.slice(0, c[0] === "streams.add" ? 1 : 2).map((x) => x)).map((c) => c.join(" ")).sort(), [
-    "consumers.add EVENTS", "consumers.add EVENTS", "consumers.add GITHUB", "streams.add", "streams.add", "streams.add",
+    "consumers.add EVENTS", "consumers.add EVENTS", "consumers.add GITHUB", "streams.add", "streams.add", "streams.add", "streams.add",
   ].sort());
   const added = jsm.calls.filter((c) => c[0] === "streams.add").map((c) => c[1].name);
-  assert.deepStrictEqual(added, ["GITHUB", "EVENTS", "STATE"]);
+  assert.deepStrictEqual(added, ["GITHUB", "EVENTS", "STATE", "LEASE"]);
   const ev = jsm.calls.filter((c) => c[0] === "consumers.add" && c[1] === "EVENTS").map((c) => c[2].durable_name);
   assert.deepStrictEqual(ev, ["dispatcher", "all"]);
 });
 
-test("a second run updates all six", async () => {
+test("a second run updates all seven", async () => {
   const jsm = fakeJsm({ stream: true, consumer: true });
   await ensureStream(jsm, "stella-rain");
-  assert.strictEqual(jsm.calls.filter((c) => c[0] === "streams.update").length, 3);
+  assert.strictEqual(jsm.calls.filter((c) => c[0] === "streams.update").length, 4);
   assert.strictEqual(jsm.calls.filter((c) => c[0] === "consumers.update").length, 3);
   assert.ok(!jsm.calls.some((c) => c[0].endsWith(".add")));
 });
@@ -181,12 +181,12 @@ test("STATE: state.<owner>.> on file storage, one message per subject, 30 days, 
   assert.strictEqual(s.discard, "old");
 });
 
-test("six accounts of GITHUB + EVENTS + STATE fit max_file_store", () => {
+test("six accounts of GITHUB + EVENTS + STATE + LEASE fit max_file_store", () => {
   const conf = fs.readFileSync(path.join(__dirname, "..", "nats", "nats-server.conf"), "utf8");
   const m = /^\s*max_file_store:\s*(\d+)\s*(KB|MB|GB|TB)?\s*$/im.exec(conf);
   const unit = { KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12 }[(m[2] || "").toUpperCase()] || 1;
-  const six = 6 * (streamFor("x").max_bytes + eventsStreamFor("x").max_bytes + stateStreamFor("x").max_bytes);
-  assert.strictEqual(six, 981467136);
+  const six = 6 * (streamFor("x").max_bytes + eventsStreamFor("x").max_bytes + stateStreamFor("x").max_bytes + leaseStreamFor("x").max_bytes);
+  assert.strictEqual(six, 987758592);
   assert.ok(six <= Number(m[1]) * unit);
 });
 
@@ -210,6 +210,35 @@ test("nats-server.conf: each receiver may write state.<owner>.> and use the STAT
     // Decision 21 (S3): the reader reads STATE for watch.js --state, and nothing more.
     assert.ok(reader.includes('"$JS.API.STREAM.INFO.STATE"') && reader.includes('"$JS.API.STREAM.MSG.GET.STATE"'), "a reader reads STATE");
     for (const no of ['"state.', "CREATE.STATE", "UPDATE.STATE"]) assert.ok(!reader.includes(no), `a reader has no ${no}`);
+  }
+});
+
+// ---- decision 33: stream LEASE, one reader per org ----
+
+test("LEASE: lease.<owner>.> on file storage, one message per subject, 35 min, 1 MiB, discard old", () => {
+  const s = leaseStreamFor("kade-agent");
+  assert.strictEqual(s.name, "LEASE");
+  assert.deepStrictEqual(s.subjects, ["lease.kade-agent.>"]);
+  assert.strictEqual(s.storage, "file");
+  assert.strictEqual(s.max_msgs_per_subject, 1);
+  assert.strictEqual(s.max_age, 35 * 60 * 1e9);
+  assert.strictEqual(s.max_bytes, 1 * MiB);
+  assert.strictEqual(s.discard, "old");
+});
+
+test("nats-server.conf: each receiver creates and updates LEASE; a reader reads it and writes only lease.<owner>.>", () => {
+  const conf = fs.readFileSync(path.join(__dirname, "..", "nats", "nats-server.conf"), "utf8");
+  const receivers = conf.split("nkey: $RECEIVER_NKEY_").slice(1).map((b) => b.split("nkey: $READER_NKEY_")[0]);
+  for (const r of receivers) {
+    for (const api of ["INFO", "CREATE", "UPDATE"]) assert.ok(r.includes(`"$JS.API.STREAM.${api}.LEASE"`), `each receiver has STREAM.${api}.LEASE`);
+    assert.ok(!r.includes('"lease.'), "a receiver writes no lease");
+  }
+  const readers = conf.split("nkey: $READER_NKEY_").slice(1).map((b) => b.split("nkey: $RECEIVER_NKEY_")[0]);
+  assert.strictEqual(readers.length, 4);
+  for (const [i, o] of ["kade-k8s-platform", "kade-agent", "stella-rain", "star-resonance"].entries()) {
+    const reader = readers[i];
+    assert.ok(reader.includes(`"lease.${o}.>"`) && reader.includes('"$JS.API.STREAM.MSG.GET.LEASE"'), `reader ${o} reads and writes its lease`);
+    for (const no of ["CREATE.LEASE", "UPDATE.LEASE", "PURGE.LEASE", "DELETE.LEASE"]) assert.ok(!reader.includes(no), `reader ${o} has no ${no}`);
   }
 });
 
