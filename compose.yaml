@@ -35,6 +35,7 @@ services:
     environment:
       APP_ID: ${APP_ID:-}
       ALLOWED_OWNERS: ${ALLOWED_OWNERS:-}
+      MAIN_INFO_WORKFLOWS: ${MAIN_INFO_WORKFLOWS:-}
       NATS_URL: nats://nats:4222
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
       APP_PRIVATE_KEY_FILE: /run/secrets/app_private_key
